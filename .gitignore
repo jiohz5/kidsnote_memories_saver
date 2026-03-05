@@ -1,0 +1,39 @@
+# Build artifacts
+build/
+dist/
+*.spec
+__pycache__/
+*.pyc
+
+# Debug/temp files
+_cleanup.py
+debug_*.py
+debug_*.html
+patch_*.py
+test.py
+
+# Old/unused project files
+project.py
+project.ipynb
+project1.md
+data*.xlsx
+result.xlsx
+move_photos.py
+rename_photos.py
+*.zip
+
+# IDE
+.vscode/
+.idea/
+
+# Config (contains login info)
+Kidsnote_Config.ini
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Virtual Environment & Large binaries
+venv_build/
+msedgedriver.exe
+Kidsnote_Release_*/

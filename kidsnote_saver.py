@@ -65,92 +65,125 @@ class KidsnoteApp(QtWidgets.QWidget):
     def init_ui(self):
         self.setWindowTitle('Kidsnote Memories Saver V1.00')
         
-        # --- 키즈노트 테마 글로벌 QSS 적용 ---
-        self.setStyleSheet("""
-            QWidget {
+        # 사용자의 화면 해상도를 인식하여 기본 스케일 값 도출 (FHD, QHD 등 대응)
+        screen = QtWidgets.QApplication.primaryScreen()
+        screen_height = screen.availableGeometry().height() if screen else 1080
+            
+        # 4K 모니터(세로 해상도 약 2160) 기준에서 보던 비율을 다른 해상도에서도 동일하게 느끼도록 스케일 조정.
+        # FHD(1080)의 경우 scale이 약 0.5가 되어 높이가 절반(800)으로 줄어듦
+        scale = min(1.0, screen_height / 2160.0)
+        
+        # UI 마진이나 박스 크기를 위한 스케일링 (해상도 비율 그대로 줄임)
+        def S(val):
+            return max(1, int(val * scale))
+            
+        # 폰트 전용 스케일링 함수: 글씨가 너무 작아서 안 보이는 현상(FHD에서 너무 작음)을 방지하기 위해 최소 크기 방어선(하한선) 설정
+        def FS(val):
+            # FHD(scale 0.5)일 때 폰트가 절반으로 확 줄어들지 않고, 다소 완만하게 줄어들도록 보정(0.8 제곱) 및 하한선 제한
+            return max(11, int(val * (scale ** 0.8)))
+            
+        # 화면의 60~70% 정도만 차지하도록 콤팩트하게 GUI 높이를 줄여서 시야 확보 (기준 1600 -> 1500 (레이아웃 잘림 방지용으로 살짝 여유 추가))
+        target_height = FS(1500)
+        target_width = int(980 * (scale ** 0.7))
+        
+        # 글씨나 입력칸이 아예 잘리지 않도록 안전 장치
+        target_width = max(580, target_width)
+        target_height = max(680, target_height)
+            
+        # 창을 화면의 적절한 위치(세로 가운데 쯤)에 배치
+        y_pos = max(30, (screen_height - target_height) // 2)
+        self.setGeometry(300, y_pos, target_width, target_height)
+        
+        # 창 크기를 고정하여 이동 시 윈도우 스냅으로 인해 강제로 크기가 변하는 현상 원천 차단
+        self.setFixedSize(target_width, target_height)
+            
+        # --- 키즈노트 테마 글로벌 QSS 적용 (스케일 반영) ---
+        self.setStyleSheet(f"""
+            QWidget {{
                 background-color: #F8F9FA;
                 font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif;
                 color: #2D3748;
-            }
-            QPushButton {
+                font-size: {FS(14)}px;  /* 전역 기본 폰트 가독성 확보 */
+            }}
+            QPushButton {{
                 background-color: #03A9F4;
                 color: white;
                 font-weight: bold;
                 border: none;
-                border-radius: 6px;
-                padding: 8px 15px;
-            }
-            QPushButton:hover {
+                border-radius: {S(6)}px;
+                padding: {S(8)}px {FS(15)}px;
+            }}
+            QPushButton:hover {{
                 background-color: #0288D1;
-            }
-            QPushButton:disabled {
+            }}
+            QPushButton:disabled {{
                 background-color: #CBD5E0;
                 color: #A0AEC0;
-            }
-            QLineEdit, QComboBox {
-                border: 2px solid #E2E8F0;
-                border-radius: 4px;
-                padding: 5px;
+            }}
+            QLineEdit, QComboBox {{
+                border: {S(2)}px solid #E2E8F0;
+                border-radius: {S(4)}px;
+                padding: {S(5)}px;
                 background-color: white;
-            }
-            QLineEdit:focus, QComboBox:focus {
-                border: 2px solid #FFC300;
-            }
-            QGroupBox {
-                border: 2px solid #E2E8F0;
-                border-radius: 6px;
-                margin-top: 15px;
+            }}
+            QLineEdit:focus, QComboBox:focus {{
+                border: {S(2)}px solid #FFC300;
+            }}
+            QGroupBox {{
+                border: {S(2)}px solid #E2E8F0;
+                border-radius: {S(6)}px;
+                margin-top: {FS(15)}px;
+                padding-top: {FS(25)}px;
+                padding-bottom: {FS(10)}px;
                 font-weight: bold;
                 background-color: white;
-            }
-            QGroupBox::title {
+            }}
+            QGroupBox::title {{
                 subcontrol-origin: margin;
                 subcontrol-position: top left;
-                left: 10px;
-                padding: 0 5px;
+                left: {FS(10)}px;
+                padding: 0 {S(5)}px;
                 color: #FF5722;
-            }
-            QTableWidget {
+            }}
+            QTableWidget {{
                 background-color: white;
-                border: 1px solid #E2E8F0;
-                border-radius: 4px;
+                border: {S(1)}px solid #E2E8F0;
+                border-radius: {S(4)}px;
                 gridline-color: #EDF2F7;
-            }
-            QHeaderView::section {
+            }}
+            QHeaderView::section {{
                 background-color: #F1F5F9;
                 font-weight: bold;
                 color: #4A5568;
                 border: none;
-                border-bottom: 2px solid #E2E8F0;
-                padding: 4px;
-            }
-            QCheckBox {
-                spacing: 8px;
-                font-size: 13px;
+                border-bottom: {S(2)}px solid #E2E8F0;
+                padding: {S(4)}px;
+            }}
+            QCheckBox {{
+                spacing: {S(8)}px;
+                font-size: {FS(13)}px;
                 font-weight: bold;
                 color: #4A5568;
-            }
-            QCheckBox::indicator {
-                width: 18px;
-                height: 18px;
-            }
-            QRadioButton {
+            }}
+            QCheckBox::indicator {{
+                width: {FS(18)}px;
+                height: {FS(18)}px;
+            }}
+            QRadioButton {{
                 font-weight: bold;
                 color: #4A5568;
-            }
+            }}
         """)
-        
-        # 이전 기본 사이즈에서 세로 길이(Height)만 조금 더 길고 시원하게 늘림
-        self.setGeometry(300, 50, 980, 1600)
-        self.setMinimumSize(780, 900)
-        
+            
         # 첫 번째 가이드 팝업 실행
         QtCore.QTimer.singleShot(700, self.show_initial_popup)
         
         # IDE 등에서 기본 파이썬 실행시 표시될 귀여운 아이콘(폴더나 집 모양 스탠다드 아이콘 활용)
         self.setWindowIcon(self.style().standardIcon(QtWidgets.QStyle.SP_DirHomeIcon))
 
-        main_layout = QtWidgets.QVBoxLayout()
+        # --- 레이아웃 설정 (메인 스크롤바를 없애기 위해 QScrollArea 제거하고 창 자체에 고정) ---
+        main_layout = QtWidgets.QVBoxLayout(self)
+        main_layout.setSpacing(FS(10))
 
         # Config setup for Local ID/PW save
         import configparser, base64
@@ -168,51 +201,59 @@ class KidsnoteApp(QtWidgets.QWidget):
 
         # Login Info Group
         login_group = QtWidgets.QGroupBox("로그인 정보")
-        login_layout = QtWidgets.QGridLayout()
-        login_layout.setColumnStretch(1, 1) # 빈 공간 채우기
+        login_layout = QtWidgets.QHBoxLayout()
+        login_layout.setSpacing(FS(15))
         
-        # 아이디 입력부: 왼쪽 끝 정렬, 입력칸과 간격 밀착
+        # 1. 왼쪽: 아이디/비밀번호 수직 배치
+        idpw_layout = QtWidgets.QVBoxLayout()
+        idpw_layout.setSpacing(FS(5))
+        
         id_layout = QtWidgets.QHBoxLayout()
-        id_label = QtWidgets.QLabel("아이디:")
-        id_layout.addWidget(id_label)
+        id_layout.addWidget(QtWidgets.QLabel("아이디:"))
         self.id_input = QtWidgets.QLineEdit(saved_id)
-        self.id_input.setMaximumWidth(200)
+        self.id_input.setMinimumWidth(FS(140))
+        self.id_input.setMaximumWidth(FS(180))
         id_layout.addWidget(self.id_input)
-        id_layout.addStretch() # 뒤쪽 빈공간 채우기
-        login_layout.addLayout(id_layout, 0, 0, 1, 2)
+        idpw_layout.addLayout(id_layout)
         
-        # 비밀번호 입력부: 왼쪽 끝 정렬, 입력칸과 간격 밀착
         pw_layout = QtWidgets.QHBoxLayout()
-        pw_label = QtWidgets.QLabel("비밀번호:")
-        pw_layout.addWidget(pw_label)
+        pw_layout.addWidget(QtWidgets.QLabel("비밀번호:"))
         self.pw_input = QtWidgets.QLineEdit(saved_pw)
         self.pw_input.setEchoMode(QtWidgets.QLineEdit.Password)
-        self.pw_input.setMaximumWidth(200)
+        self.pw_input.setMinimumWidth(FS(140))
+        self.pw_input.setMaximumWidth(FS(180))
         pw_layout.addWidget(self.pw_input)
-        pw_layout.addStretch() # 뒤쪽 빈공간 채우기
-        login_layout.addLayout(pw_layout, 1, 0, 1, 2)
+        idpw_layout.addLayout(pw_layout)
         
-        # 로그인 버튼: 아이디/비밀번호 오른쪽에 배치 (행 0~1 병합)
-        self.login_btn = QtWidgets.QPushButton('🔐 키즈노트\n로그인 열기')
+        login_layout.addLayout(idpw_layout)
+        
+        # 2. 가운데: 로그인 버튼
+        self.login_btn = QtWidgets.QPushButton('🔐 키즈노트 로그인 열기')
         self.login_btn.clicked.connect(self.open_browser)
-        self.login_btn.setMinimumWidth(260)
-        self.login_btn.setMinimumHeight(96)
-        self.login_btn.setStyleSheet("""
-            QPushButton { background-color: #FFC300; color: #2D3748; font-weight: bold; border-radius: 6px; font-size: 20px; }
-            QPushButton:hover { background-color: #E6B000; }
-            QPushButton:disabled { background-color: #FFDE59; color: #8A94A6; }
+        self.login_btn.setMinimumWidth(FS(180))
+        self.login_btn.setMinimumHeight(FS(60))
+        self.login_btn.setStyleSheet(f"""
+            QPushButton {{ background-color: #FFC300; color: #2D3748; font-weight: bold; border-radius: {S(6)}px; font-size: {FS(15)}px; }}
+            QPushButton:hover {{ background-color: #E6B000; }}
+            QPushButton:disabled {{ background-color: #FFDE59; color: #8A94A6; }}
         """)
-        login_layout.addWidget(self.login_btn, 0, 2, 2, 1)  # 행 0~1, 열 2
+        login_layout.addWidget(self.login_btn)
         
-        self.chk_remember = QtWidgets.QCheckBox("로그인 정보 내 PC에 저장하기 (암호화가 아니므로 개인 PC에서만 사용 권장)")
+        # 3. 오른쪽: 저장 설정 및 보안 안내문
+        chk_notice_layout = QtWidgets.QVBoxLayout()
+        chk_notice_layout.setSpacing(FS(5))
+        
+        self.chk_remember = QtWidgets.QCheckBox("내 PC에 로그인 정보 자동저장")
         self.chk_remember.setChecked(saved_remember)
-        self.chk_remember.setStyleSheet("color: #03A9F4; font-weight: bold;")
-        login_layout.addWidget(self.chk_remember, 2, 0, 1, 3)
+        self.chk_remember.setStyleSheet(f"color: #03A9F4; font-weight: bold; font-size: {FS(13)}px;")
+        chk_notice_layout.addWidget(self.chk_remember)
         
-        security_notice = QtWidgets.QLabel("※ 입력하신 정보는 이 PC에서 자동 로그인에만 사용되며, 절대로 인터넷을 통해 외부 서버로 전송되지 않습니다.")
-        security_notice.setStyleSheet("color: gray; font-size: 11px; margin-top: 5px;")
-        security_notice.setWordWrap(True)
-        login_layout.addWidget(security_notice, 3, 0, 1, 3)
+        security_notice = QtWidgets.QLabel("※ 입력정보는 현재 이 PC에만 저장되며\n절대 외부 서버로 전송되지 않습니다.")
+        security_notice.setStyleSheet(f"color: gray; font-size: {FS(11)}px;")
+        chk_notice_layout.addWidget(security_notice)
+        
+        login_layout.addLayout(chk_notice_layout)
+        login_layout.addStretch() # 오른쪽 끝 여백 채우기
         
         login_group.setLayout(login_layout)
         main_layout.addWidget(login_group)
@@ -222,84 +263,81 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.tray_icon.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_DirHomeIcon))
         self.tray_icon.show()
 
-        # Status Label
+        # Status Label and Progress Bar 
+        status_prog_layout = QtWidgets.QHBoxLayout()
+        
         self.status_label = QtWidgets.QLabel('준비됨')
         self.status_label.setAlignment(QtCore.Qt.AlignCenter)
-        self.status_label.setStyleSheet("font-weight: bold; color: white; background-color: #03A9F4; font-size: 18px; padding: 10px; border-radius: 5px;")
-        main_layout.addWidget(self.status_label)
+        self.status_label.setStyleSheet(f"font-weight: bold; color: white; background-color: #03A9F4; font-size: {FS(16)}px; padding: {FS(8)}px; border-radius: {S(5)}px;")
+        status_prog_layout.addWidget(self.status_label, stretch=1)
         
-        # Progress Bar
         self.progress_bar = QtWidgets.QProgressBar()
         self.progress_bar.setValue(0)
         self.progress_bar.setTextVisible(True)
-        self.progress_bar.setStyleSheet("""
-            QProgressBar {
-                border: 2px solid #E2E8F0;
-                border-radius: 5px;
+        self.progress_bar.setStyleSheet(f"""
+            QProgressBar {{
+                border: {S(2)}px solid #E2E8F0;
+                border-radius: {S(5)}px;
                 text-align: center;
                 font-weight: bold;
-                font-size: 14px;
+                font-size: {FS(14)}px;
                 color: #2D3748;
                 background-color: white;
-            }
-            QProgressBar::chunk {
+            }}
+            QProgressBar::chunk {{
                 background-color: #FFC300;
-                border-radius: 3px;
-            }
+                border-radius: {S(3)}px;
+            }}
         """)
-        main_layout.addWidget(self.progress_bar)
+        status_prog_layout.addWidget(self.progress_bar, stretch=2)
+        main_layout.addLayout(status_prog_layout)
 
-        # Profile Layout
-        self.profile_widget = QtWidgets.QWidget()
-        self.profile_layout = QtWidgets.QVBoxLayout(self.profile_widget)
-        self.profile_layout.setContentsMargins(15, 10, 15, 10)
-        self.profile_layout.setAlignment(QtCore.Qt.AlignCenter)
+        # Collect Options Group (1단계: 아이 현황 및 수집 범위)
+        collect_group = QtWidgets.QGroupBox("1단계: 아이 현황 및 수집 범위")
+        collect_main_layout = QtWidgets.QHBoxLayout()
+
+        # 왼쪽: 아이 현황 (프로필 이미지, 라벨, 콤보박스)
+        left_layout = QtWidgets.QVBoxLayout()
+        left_layout.setAlignment(QtCore.Qt.AlignCenter)
+        left_layout.setSpacing(FS(5))
         
+        # Profile Image Label
         self.profile_img_label = QtWidgets.QLabel()
-        self.profile_img_label.setFixedSize(100, 100)
-        self.profile_img_label.setStyleSheet("border-radius: 50px; background-color: #E2E8F0;")
+        self.profile_img_label.setFixedSize(FS(80), FS(80))
+        self.profile_img_label.setStyleSheet(f"border-radius: {FS(40)}px; background-color: #E2E8F0;")
         self.profile_img_label.setAlignment(QtCore.Qt.AlignCenter)
         self.profile_img_label.setText("사진")
-        
-        self.profile_label = QtWidgets.QLabel('아이 정보: (아직 불러오지 않음)')
-        self.profile_label.setStyleSheet("font-weight: bold; color: #03A9F4; font-size: 17px;")
-        
-        self.profile_layout.addWidget(self.profile_img_label, alignment=QtCore.Qt.AlignCenter)
-        self.profile_layout.addWidget(self.profile_label, alignment=QtCore.Qt.AlignCenter)
-        
-        self.profile_widget.setStyleSheet("background-color: white; border-radius: 8px; border: 2px solid #E2E8F0;")
-        main_layout.addWidget(self.profile_widget)
+        left_layout.addWidget(self.profile_img_label, alignment=QtCore.Qt.AlignCenter)
 
-        # Collect Options Group (1단계: 수집 범위 설정 + 불러오기)
-        collect_group = QtWidgets.QGroupBox("1단계: 아이 선택 및 수집 범위")
-        collect_outer = QtWidgets.QVBoxLayout()
-
-        # 대상 자녀 콤보박스를 1단계 최상단에 배치
+        
+        # Child Combobox
         self.child_combo = QtWidgets.QComboBox()
         self.child_combo.addItem("1단계를 진행하세요")
         self.child_combo.setEnabled(False)
-        self.child_combo.setMinimumHeight(44)
-        self.child_combo.setStyleSheet("font-weight: bold; font-size: 16px; color: #2D3748; background-color: #F7FAFC; border: 2px solid #E2E8F0; border-radius: 5px;")
+        self.child_combo.setMinimumHeight(FS(36))
+        self.child_combo.setStyleSheet(f"font-weight: bold; font-size: {FS(13)}px; color: #2D3748; background-color: #F7FAFC; border: {S(2)}px solid #E2E8F0; border-radius: {S(5)}px;")
         self.child_combo.currentIndexChanged.connect(self.on_child_combo_changed)
-        collect_outer.addWidget(self.child_combo)
-        collect_outer.addSpacing(10)
+        left_layout.addWidget(self.child_combo)
+
+        # 오른쪽: 기존 1단계 내용 (배너, 알림장/앨범 선택, 조회 기간, 버튼)
+        right_layout = QtWidgets.QVBoxLayout()
 
         # 수집 중 상태 안내 배너 (기본 숨김)
         self.loading_banner = QtWidgets.QLabel("⏳ 추억 목록을 불러오는 중입니다... 잠시 기다려 주세요.")
         self.loading_banner.setAlignment(QtCore.Qt.AlignCenter)
-        self.loading_banner.setStyleSheet(
-            "background-color: #FFF3CD; color: #856404; font-weight: bold; "
-            "font-size: 13px; padding: 8px; border-radius: 5px; border: 1px solid #FCEEBB;"
-        )
+        self.loading_banner.setStyleSheet(f"""
+            background-color: #FFF3CD; color: #856404; font-weight: bold; 
+            font-size: {FS(13)}px; padding: {S(5)}px; border-radius: {S(5)}px; border: {S(1)}px solid #FCEEBB;
+        """)
         self.loading_banner.setVisible(False)
-        collect_outer.addWidget(self.loading_banner)
+        right_layout.addWidget(self.loading_banner)
 
         btn_layout = QtWidgets.QHBoxLayout()
 
         # 체크박스 (알림장/앨범)
         chk_layout = QtWidgets.QVBoxLayout()
         chk_layout.setAlignment(QtCore.Qt.AlignVCenter)
-        chk_layout.setSpacing(10)
+        chk_layout.setSpacing(FS(5))
         self.chk_report = QtWidgets.QCheckBox("알림장")
         self.chk_report.setChecked(True)
         self.chk_album = QtWidgets.QCheckBox("앨범")
@@ -317,32 +355,48 @@ class KidsnoteApp(QtWidgets.QWidget):
         period_layout.addWidget(self.period_combo)
         btn_layout.addLayout(period_layout)
 
-        # 추억 목록 불러오기 버튼
+        # 추억 목록 불러오기 / 작업 중지 버튼 (세로 배치)
+        action_btn_layout = QtWidgets.QVBoxLayout()
+        action_btn_layout.setSpacing(FS(5))
+        
         self.load_btn = QtWidgets.QPushButton('2. 추억 목록 불러오기')
         self.load_btn.clicked.connect(self.load_memories)
         self.load_btn.setEnabled(False)
-        self.load_btn.setFixedHeight(60)
-        self.load_btn.setStyleSheet("""
-            QPushButton { background-color: #FFC300; color: #2D3748; font-weight: bold; border-radius: 6px; font-size: 15px; }
-            QPushButton:hover { background-color: #E6B000; }
-            QPushButton:disabled { background-color: #FFDE59; color: #8A94A6; }
+        self.load_btn.setFixedHeight(FS(40))
+        self.load_btn.setStyleSheet(f"""
+            QPushButton {{ background-color: #FFC300; color: #2D3748; font-weight: bold; border-radius: {S(6)}px; font-size: {FS(14)}px; }}
+            QPushButton:hover {{ background-color: #E6B000; }}
+            QPushButton:disabled {{ background-color: #FFDE59; color: #8A94A6; }}
         """)
-        btn_layout.addWidget(self.load_btn)
+        action_btn_layout.addWidget(self.load_btn)
 
-        # 작업 중지 버튼
         self.stop_btn = QtWidgets.QPushButton('작업 중지')
         self.stop_btn.clicked.connect(self.stop_memories)
         self.stop_btn.setEnabled(False)
-        self.stop_btn.setFixedHeight(60)
-        self.stop_btn.setStyleSheet("""
-            QPushButton { background-color: #E53E3E; color: white; font-weight: bold; border-radius: 6px; font-size: 15px; }
-            QPushButton:hover { background-color: #C53030; }
-            QPushButton:disabled { background-color: #FC8181; }
+        self.stop_btn.setFixedHeight(FS(40))
+        self.stop_btn.setStyleSheet(f"""
+            QPushButton {{ background-color: #E53E3E; color: white; font-weight: bold; border-radius: {S(6)}px; font-size: {FS(14)}px; }}
+            QPushButton:hover {{ background-color: #C53030; }}
+            QPushButton:disabled {{ background-color: #FC8181; }}
         """)
-        btn_layout.addWidget(self.stop_btn)
+        action_btn_layout.addWidget(self.stop_btn)
 
-        collect_outer.addLayout(btn_layout)
-        collect_group.setLayout(collect_outer)
+        btn_layout.addLayout(action_btn_layout)
+
+        right_layout.addLayout(btn_layout)
+
+        # 좌우 레이아웃을 메인에 합치고 구분선 추가
+        collect_main_layout.addLayout(left_layout, stretch=1)
+        
+        v_line = QtWidgets.QFrame()
+        v_line.setFrameShape(QtWidgets.QFrame.VLine)
+        v_line.setFrameShadow(QtWidgets.QFrame.Sunken)
+        v_line.setStyleSheet("border: 1px solid #E2E8F0;")
+        collect_main_layout.addWidget(v_line)
+        
+        collect_main_layout.addLayout(right_layout, stretch=3)
+
+        collect_group.setLayout(collect_main_layout)
         main_layout.addWidget(collect_group)
 
         # Table View Group
@@ -364,7 +418,7 @@ class KidsnoteApp(QtWidgets.QWidget):
         target_layout.addWidget(self.search_input)
         
         self.selection_label = QtWidgets.QLabel("선택됨: 0 / 전체: 0")
-        self.selection_label.setStyleSheet("font-weight: bold; color: #E65100; font-size: 14px; margin-left: 10px;")
+        self.selection_label.setStyleSheet(f"font-weight: bold; color: #E65100; font-size: {FS(14)}px; margin-left: {FS(10)}px;")
         target_layout.addWidget(self.selection_label)
         
         table_layout.addLayout(target_layout)
@@ -372,15 +426,16 @@ class KidsnoteApp(QtWidgets.QWidget):
         # Table View
         self.table = QtWidgets.QTableWidget()
         self.table.setColumnCount(6)
-        self.table.setMinimumHeight(1200) # 목록이 충분히 보이도록 높이 확보
+        # 테이블의 기본 높이를 확 줄여서(250), 초기 빈 상태에선 앱 중앙 스크롤이 생기지 않도록 방지
+        self.table.setMinimumHeight(FS(250))
         self.table.setHorizontalHeaderLabels(['선택', '날짜', '제목', '종류', '작성자', '사진'])
         self.table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.Fixed)
         self.table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.Stretch)
-        self.table.setColumnWidth(0, 40)
-        self.table.setColumnWidth(1, 110)  # 날짜: "2026.01.26"
-        self.table.setColumnWidth(3, 70)   # 종류: 알림장/앨범
-        self.table.setColumnWidth(4, 180)  # 작성자: "2025 GREEN 교사" 등
-        self.table.setColumnWidth(5, 45)   # 사진: O/X
+        self.table.setColumnWidth(0, FS(40))
+        self.table.setColumnWidth(1, FS(110))  # 날짜: "2026.01.26"
+        self.table.setColumnWidth(3, FS(70))   # 종류: 알림장/앨범
+        self.table.setColumnWidth(4, FS(180))  # 작성자: "2025 GREEN 교사" 등
+        self.table.setColumnWidth(5, FS(45))   # 사진: O/X
         self.table.setSortingEnabled(True)
         table_layout.addWidget(self.table)
         
@@ -408,10 +463,32 @@ class KidsnoteApp(QtWidgets.QWidget):
 
         options_layout.addLayout(dir_layout)
 
+        # 3단계 옵션박스 전용 초밀착(Tight) 스타일 
+        tight_group_style = f"""
+            QGroupBox {{
+                border: {S(1)}px solid #E2E8F0;
+                border-radius: {S(4)}px;
+                margin-top: {FS(8)}px;
+                padding-top: {FS(12)}px;
+                padding-bottom: {FS(0)}px;
+                font-weight: bold;
+                background-color: white;
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                left: {FS(5)}px;
+                padding: 0 {S(2)}px;
+                color: #FF5722;
+            }}
+        """
+
         # Folder Options Group
         folder_group_box = QtWidgets.QGroupBox("저장 방식")
+        folder_group_box.setStyleSheet(tight_group_style)
         self.folder_btn_group = QtWidgets.QButtonGroup()
         self.radio_layout_folder = QtWidgets.QHBoxLayout()
+        self.radio_layout_folder.setContentsMargins(FS(5), 0, FS(5), 0)
         self.folder_individual_radio = QtWidgets.QRadioButton("개별 디렉토리에 저장 (날짜별)")
         self.folder_individual_radio.setChecked(True)
         self.folder_single_radio = QtWidgets.QRadioButton("한 곳에 모두 저장")
@@ -423,8 +500,10 @@ class KidsnoteApp(QtWidgets.QWidget):
 
         # File Type Option Group
         filetype_group_box = QtWidgets.QGroupBox("다운로드 항목 종류")
+        filetype_group_box.setStyleSheet(tight_group_style)
         self.filetype_btn_group = QtWidgets.QButtonGroup()
         radio_layout = QtWidgets.QHBoxLayout()
+        radio_layout.setContentsMargins(FS(5), 0, FS(5), 0)
         self.pdf_radio = QtWidgets.QRadioButton("전체 페이지 PDF 저장")
         self.pdf_radio.setChecked(True)
         self.photo_radio = QtWidgets.QRadioButton("사진+동영상만 받기")
@@ -436,8 +515,10 @@ class KidsnoteApp(QtWidgets.QWidget):
 
         # Overwrite Option Group
         overwrite_group_box = QtWidgets.QGroupBox("동일 항목 덮어쓰기")
+        overwrite_group_box.setStyleSheet(tight_group_style)
         self.overwrite_btn_group = QtWidgets.QButtonGroup()
         radio_layout_overwrite = QtWidgets.QHBoxLayout()
+        radio_layout_overwrite.setContentsMargins(FS(5), 0, FS(5), 0)
         self.overwrite_allow_radio = QtWidgets.QRadioButton("허용")
         self.overwrite_allow_radio.setChecked(True)
         self.overwrite_skip_radio = QtWidgets.QRadioButton("넘어가기")
@@ -448,6 +529,7 @@ class KidsnoteApp(QtWidgets.QWidget):
         overwrite_group_box.setLayout(radio_layout_overwrite)
 
         options_grid = QtWidgets.QGridLayout()
+        options_grid.setSpacing(FS(5))  # 그리드 사이 간격 축소
         options_grid.addWidget(overwrite_group_box, 0, 0)
         options_grid.addWidget(filetype_group_box, 0, 1)
         options_grid.addWidget(folder_group_box, 1, 0, 1, 2)
@@ -461,27 +543,27 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.download_btn = QtWidgets.QPushButton('3. 선택한 항목 다운로드 시작')
         self.download_btn.clicked.connect(self.start_download)
         self.download_btn.setEnabled(False)
-        self.download_btn.setFixedHeight(40)
-        self.download_btn.setStyleSheet("""
-            QPushButton { background-color: #FFC300; color: #2D3748; font-weight: bold; border-radius: 6px; }
-            QPushButton:hover { background-color: #E6B000; }
-            QPushButton:disabled { background-color: #FFDE59; color: #8A94A6; }
+        self.download_btn.setFixedHeight(FS(40))
+        self.download_btn.setStyleSheet(f"""
+            QPushButton {{ background-color: #FFC300; color: #2D3748; font-weight: bold; border-radius: {S(6)}px; }}
+            QPushButton:hover {{ background-color: #E6B000; }}
+            QPushButton:disabled {{ background-color: #FFDE59; color: #8A94A6; }}
         """)
         main_layout.addWidget(self.download_btn)
 
-        self.setLayout(main_layout)
+        # (QScrollArea 제거됨: 레이아웃이 self에 직접 연결되었으므로 추가 설정 불필요)
 
         # --- 로딩 오버레이 ---
         self._overlay = QtWidgets.QWidget(self)
         self._overlay.setStyleSheet("background-color: rgba(0, 0, 0, 160);")
         self._overlay_label = QtWidgets.QLabel("잠시만 기다려 주세요...", self._overlay)
         self._overlay_label.setAlignment(QtCore.Qt.AlignCenter)
-        self._overlay_label.setStyleSheet("""
+        self._overlay_label.setStyleSheet(f"""
             color: white;
-            font-size: 18px;
+            font-size: {FS(18)}px;
             font-weight: bold;
             background: transparent;
-            padding: 20px;
+            padding: {FS(20)}px;
         """)
         self._overlay_label.setWordWrap(True)
         overlay_layout = QtWidgets.QVBoxLayout(self._overlay)
@@ -490,27 +572,50 @@ class KidsnoteApp(QtWidgets.QWidget):
         overlay_layout.addStretch()
         self._overlay.hide()
 
-        # --- 잠금 오버레이 (로그인 전 메뉴 접근 방지) ---
+        # --- 1단계 잠금 오버레이 (로그인 전 메뉴 접근 방지) ---
         self.lock_overlay = QtWidgets.QWidget(self)
         self.lock_overlay.setStyleSheet("background-color: rgba(240, 240, 240, 200);")
         lock_label = QtWidgets.QLabel("위에서 '키즈노트 로그인 열기'를 먼저 완료해 주세요", self.lock_overlay)
         lock_label.setAlignment(QtCore.Qt.AlignCenter)
-        lock_label.setStyleSheet("color: #2D3748; font-size: 22px; font-weight: bold; background: transparent;")
+        lock_label.setStyleSheet(f"color: #2D3748; font-size: {FS(18)}px; font-weight: bold; background: transparent;")
         lock_layout = QtWidgets.QVBoxLayout(self.lock_overlay)
         lock_layout.addWidget(lock_label)
         self.lock_overlay.show()
         self.lock_overlay.raise_()
 
-    # --- 로딩 오버레이 제어 ---
+        # --- 2/3단계 잠금 오버레이 (추억 목록 불러오기 전 접근 방지) ---
+        self.stage2_lock_overlay = QtWidgets.QWidget(self)
+        self.stage2_lock_overlay.setStyleSheet("background-color: rgba(240, 240, 240, 210);")
+        stage2_lock_label = QtWidgets.QLabel("먼저 1단계에서 [추억 목록 불러오기]를 진행해 주세요", self.stage2_lock_overlay)
+        stage2_lock_label.setAlignment(QtCore.Qt.AlignCenter)
+        stage2_lock_label.setStyleSheet(f"color: #2D3748; font-size: {FS(18)}px; font-weight: bold; background: transparent;")
+        stage2_lock_layout = QtWidgets.QVBoxLayout(self.stage2_lock_overlay)
+        stage2_lock_layout.addWidget(stage2_lock_label)
+        self.stage2_lock_overlay.hide()  # 초기에는 1단계 오버레이가 가리고 있으므로 숨김 (1단계 열릴 때 같이 켬)
+
+        # 위치 계산에 필요한 핵심 위젯 참조 저장
+        self.table_group = table_group
+
+    # --- 로딩 및 잠금 오버레이 제어 ---
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._overlay.setGeometry(self.rect())
+        
+        # 1단계 잠금 오버레이 (로그인 후 해제)
         if hasattr(self, 'lock_overlay') and hasattr(self, 'status_label'):
             y_offset = self.status_label.geometry().bottom()
             if y_offset > 0:
                 new_geom = QtCore.QRect(0, y_offset, self.width(), self.height() - y_offset)
                 if self.lock_overlay.geometry() != new_geom:
                     self.lock_overlay.setGeometry(new_geom)
+
+        # 2/3단계 잠금 오버레이 (목록 불러오기 로드완료 후 해제)
+        if hasattr(self, 'stage2_lock_overlay') and hasattr(self, 'table_group') and self.stage2_lock_overlay.isVisible():
+            y_offset_stage2 = self.table_group.geometry().top()
+            if y_offset_stage2 > 0:
+                new_geom_stage2 = QtCore.QRect(0, y_offset_stage2, self.width(), self.height() - y_offset_stage2)
+                if self.stage2_lock_overlay.geometry() != new_geom_stage2:
+                    self.stage2_lock_overlay.setGeometry(new_geom_stage2)
 
     def _show_overlay(self, text='잠시만 기다려 주세요...'):
         QtCore.QMetaObject.invokeMethod(self, "_do_show_overlay", QtCore.Qt.QueuedConnection, QtCore.Q_ARG(str, text))
@@ -581,12 +686,22 @@ class KidsnoteApp(QtWidgets.QWidget):
             from selenium.webdriver.support import expected_conditions as EC
             from selenium.webdriver.common.keys import Keys
 
-            options = webdriver.ChromeOptions()
+            from selenium.webdriver.edge.service import Service
+            
+            options = webdriver.EdgeOptions()
             options.add_argument('--window-size=1100,900')
             options.add_experimental_option("detach", True) 
-            self.driver = webdriver.Chrome(options=options)
 
-            # GUI 창의 위치/크기를 읽어 Chrome을 바로 오른쪽에 배치
+            # 내장된 msedgedriver.exe 경로 탐색 (PyInstaller 빌드 환경 vs 일반 환경)
+            if hasattr(sys, '_MEIPASS'):
+                driver_path = os.path.join(sys._MEIPASS, 'msedgedriver.exe')
+            else:
+                driver_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'msedgedriver.exe')
+                
+            service = Service(executable_path=driver_path)
+            self.driver = webdriver.Edge(service=service, options=options)
+
+            # GUI 창의 위치/크기를 읽어 Edge를 바로 오른쪽에 배치
             try:
                 geo = self.geometry()
                 chrome_x = geo.x() + geo.width() + 8
@@ -608,8 +723,16 @@ class KidsnoteApp(QtWidgets.QWidget):
             pass_field.send_keys(Keys.RETURN) # Auto-submit
             
             self.update_status("안전하게 로그인 되었습니다! 아이 목록을 조회하는 중...")
-            self._update_overlay_text('✅ 로그인 성공!\n아이 정보를 가져오는 중...')
+            self._update_overlay_text("✅ 로그인 성공! 아이 정보를 확인 중입니다...")
+            self.lock_overlay.hide()
             
+            # 1단계가 열리면 2,3단계를 아직 못 만지게 stage2 잠금 활성화
+            if hasattr(self, 'stage2_lock_overlay'):
+                self.stage2_lock_overlay.show()
+                self.stage2_lock_overlay.raise_()
+                self.resizeEvent(None)  # 강제 레이아웃 실시간 갱신
+
+            self.login_btn.setText("✅ 로그인 완료")
             # 로그인 직후 메뉴 페이지로 완벽하게 넘어갈 때까지 여유있게 대기 후 명시적 주소 이동
             import time
             time.sleep(3)
@@ -967,6 +1090,10 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.chk_album.setEnabled(True)
         self.period_combo.setEnabled(True)
         self.loading_banner.setVisible(False)
+        
+        # 목록 조회가 끝났으므로 2,3단계 조작 가능하도록 오버레이 해제
+        if hasattr(self, 'stage2_lock_overlay') and self.stage2_lock_overlay.isVisible():
+             self.stage2_lock_overlay.hide()
         if self.scrape_thread.is_stopped:
             msg = f"목록 로드 중지됨: {len(self.memories)}개 수집 완료"
             self.update_status(msg)
@@ -1137,8 +1264,6 @@ class KidsnoteApp(QtWidgets.QWidget):
         text = profile_info.get('text', '알 수 없음')
         img_b64 = profile_info.get('image', None)
         
-        self.profile_label.setText(text)
-        
         if img_b64:
             import base64
             from PyQt5 import QtGui, QtCore
@@ -1192,6 +1317,12 @@ class KidsnoteApp(QtWidgets.QWidget):
         event.accept()
 
 if __name__ == '__main__':
+    # 4K 모니터 등 고해상도(High DPI) 디스플레이에서 GUI 텍스트와 UI가 극단적으로 작아지는 현상 방지
+    if hasattr(QtCore.Qt, 'AA_EnableHighDpiScaling'):
+        QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
+    if hasattr(QtCore.Qt, 'AA_UseHighDpiPixmaps'):
+        QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
+        
     app = QtWidgets.QApplication(sys.argv)
     ex = KidsnoteApp()
     ex.show()
