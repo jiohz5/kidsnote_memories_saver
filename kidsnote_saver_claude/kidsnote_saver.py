@@ -11,6 +11,9 @@ from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 import kidsnote_engine as manager
 
+APP_VERSION = "1.00"
+UPDATE_CHECK_REPO = "jiohz5/kidsnote_memories_saver"
+
 _fault_log_file = None
 
 
@@ -77,11 +80,13 @@ class ScrapeThread(QtCore.QThread):
         self.limit_date_str = limit_date_str
         self.child_name = child_name
         self.is_stopped = False
+        # 조회 결과 진단 정보 — GUI가 '기간 내 항목 없음'과 '네트워크 실패'를 구분해 안내
+        self.result_info = {}
 
     def run(self):
         try:
             memories = manager.fetch_memory_list(
-                self.driver, 
+                self.driver,
                 status_callback=self.status_signal.emit,
                 item_found_callback=self.item_found_signal.emit,
                 check_stop_callback=self.check_stopped,
@@ -89,7 +94,8 @@ class ScrapeThread(QtCore.QThread):
                 scrape_albums=self.scrape_albums,
                 profile_found_callback=self.profile_signal.emit,
                 limit_date_str=self.limit_date_str,
-                child_name=self.child_name
+                child_name=self.child_name,
+                result_info=self.result_info
             )
             self.finished_signal.emit(memories)
         except Exception as e:
@@ -108,7 +114,7 @@ class DownloadThread(QtCore.QThread):
     progress_signal = QtCore.pyqtSignal(int)
     finished_signal = QtCore.pyqtSignal(str, int, int, bool)
 
-    def __init__(self, driver, memories, indices, target_dir, is_pdf, is_single_folder, profile_name="알수없음", is_overwrite_allow=True):
+    def __init__(self, driver, memories, indices, target_dir, is_pdf, is_single_folder, profile_name="알수없음", is_overwrite_allow=True, include_video=True):
         super().__init__()
         self.driver = driver
         self.memories = memories
@@ -118,10 +124,22 @@ class DownloadThread(QtCore.QThread):
         self.is_single_folder = is_single_folder
         self.profile_name = profile_name
         self.is_overwrite_allow = is_overwrite_allow
+        self.include_video = include_video
         self.is_stopped = False
+        self._paused = False
+        # 완료 후 GUI가 참조하는 결과 정보
+        self.failed_indices = []    # 실패한 원본 인덱스 → '실패만 재시도'에 사용
+        self.succeeded_ids = []     # 성공한 항목 id → 증분 백업 기록에 사용
+        self.elapsed_sec = 0
 
     def stop(self):
         self.is_stopped = True
+
+    def pause(self):
+        self._paused = True
+
+    def resume(self):
+        self._paused = False
 
     def check_stopped(self):
         return bool(self.is_stopped)
@@ -129,9 +147,11 @@ class DownloadThread(QtCore.QThread):
     def run(self):
         import datetime
         import re
+        import time
 
         success_cnt = 0
         fail_cnt = 0
+        started_at = time.time()
         try:
             write_app_log(f"Download thread started. selected={len(self.indices)} pdf={self.is_pdf} single_folder={self.is_single_folder}")
             date_type_counts = {}
@@ -139,6 +159,10 @@ class DownloadThread(QtCore.QThread):
             self.progress_signal.emit(0)
 
             for count, idx in enumerate(self.indices):
+                # 일시정지 — 항목 단위 경계에서 대기 (중지 요청 시 즉시 탈출)
+                while self._paused and not self.is_stopped:
+                    time.sleep(0.2)
+
                 if self.is_stopped:
                     self.status_signal.emit("알림장/앨범 다운로드가 중지되었습니다.")
                     break
@@ -147,6 +171,7 @@ class DownloadThread(QtCore.QThread):
                     mem = dict(self.memories[idx])
                 except Exception:
                     fail_cnt += 1
+                    self.failed_indices.append(idx)
                     continue
 
                 self.status_signal.emit(f"다운로드 중 ({count + 1}/{total}): {mem.get('title', '')}")
@@ -205,6 +230,7 @@ class DownloadThread(QtCore.QThread):
                             self.status_signal.emit,
                             self.is_overwrite_allow,
                             self.check_stopped,
+                            self.include_video,
                         )
                     else:
                         post_dir = base_target_dir if self.is_single_folder else os.path.join(base_target_dir, clean_date)
@@ -217,15 +243,20 @@ class DownloadThread(QtCore.QThread):
                             self.status_signal.emit,
                             self.is_overwrite_allow,
                             self.check_stopped,
+                            self.include_video,
                         )
 
                     if success:
                         success_cnt += 1
+                        if mem.get('id'):
+                            self.succeeded_ids.append(mem['id'])
                     else:
                         fail_cnt += 1
+                        self.failed_indices.append(idx)
                 except Exception:
                     write_app_log("Download item failed:\n" + traceback.format_exc())
                     fail_cnt += 1
+                    self.failed_indices.append(idx)
 
                 self.progress_signal.emit(int(((count + 1) / total) * 100))
 
@@ -236,7 +267,8 @@ class DownloadThread(QtCore.QThread):
             write_app_log("Download thread failed:\n" + traceback.format_exc())
             self.status_signal.emit("다운로드 중 치명적 오류가 발생했습니다. 로그를 확인해 주세요.")
         finally:
-            write_app_log(f"Download thread finished. success={success_cnt} fail={fail_cnt} stopped={self.is_stopped}")
+            self.elapsed_sec = int(time.time() - started_at)
+            write_app_log(f"Download thread finished. success={success_cnt} fail={fail_cnt} stopped={self.is_stopped} elapsed={self.elapsed_sec}s")
             self.finished_signal.emit(self.target_dir, success_cnt, fail_cnt, self.is_stopped)
 
 
@@ -254,7 +286,58 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.is_loading_memories = False
         self.load_finished_received = False
         self.download_thread = None
+        # 증분 백업: 이전에 성공적으로 받은 항목 id 목록 (로컬 저장)
+        self.downloaded_ids = self._load_manifest()
         self.init_ui()
+        # 새 버전 확인 (백그라운드, 실패해도 무시)
+        threading.Thread(target=self._check_update_worker, daemon=True).start()
+
+    # --- 증분 백업 기록(manifest) ---
+    def _manifest_path(self):
+        base_dir = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        return os.path.join(base_dir, "KidsnoteMemoriesSaver", "downloaded_items.json")
+
+    def _load_manifest(self):
+        try:
+            import json
+            with open(self._manifest_path(), "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return set(data) if isinstance(data, list) else set()
+        except Exception:
+            return set()
+
+    def _save_manifest(self, ids):
+        try:
+            import json
+            os.makedirs(os.path.dirname(self._manifest_path()), exist_ok=True)
+            with open(self._manifest_path(), "w", encoding="utf-8") as f:
+                json.dump(sorted(ids), f, ensure_ascii=False)
+        except Exception:
+            write_app_log("Manifest save failed:\n" + traceback.format_exc())
+
+    # --- 새 버전 확인 (GitHub Releases, 조용히 실패) ---
+    def _check_update_worker(self):
+        try:
+            import json, re, urllib.request
+            url = f"https://api.github.com/repos/{UPDATE_CHECK_REPO}/releases/latest"
+            req = urllib.request.Request(url, headers={"User-Agent": "KidsnoteMemoriesSaver"})
+            with urllib.request.urlopen(req, timeout=5) as response:
+                data = json.load(response)
+            tag = str(data.get("tag_name") or "").strip()
+
+            def version_tuple(v):
+                nums = re.findall(r"\d+", v)
+                return tuple(int(n) for n in nums[:3]) if nums else (0,)
+
+            if tag and version_tuple(tag) > version_tuple(APP_VERSION):
+                self.run_on_ui_thread(lambda: self.tray_icon.showMessage(
+                    "업데이트 안내",
+                    f"새 버전 {tag} 이(가) 공개되었습니다. 블로그/GitHub에서 받아주세요.",
+                    QtWidgets.QSystemTrayIcon.Information,
+                    8000,
+                ))
+        except Exception:
+            pass
 
     @QtCore.pyqtSlot(object)
     def _run_ui_call(self, callback):
@@ -618,8 +701,12 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.select_all_btn.clicked.connect(self.select_all)
         self.deselect_all_btn = QtWidgets.QPushButton("전체 해제")
         self.deselect_all_btn.clicked.connect(self.deselect_all)
+        self.select_new_btn = QtWidgets.QPushButton("새 항목만 선택")
+        self.select_new_btn.setToolTip("이 PC에서 아직 받은 적 없는 항목만 체크합니다 (증분 백업)")
+        self.select_new_btn.clicked.connect(self.select_new_only)
         target_layout.addWidget(self.select_all_btn)
         target_layout.addWidget(self.deselect_all_btn)
+        target_layout.addWidget(self.select_new_btn)
         
         self.search_input = QtWidgets.QLineEdit()
         self.search_input.setPlaceholderText("검색어 입력 (제목, 작성자 등)")
@@ -634,10 +721,10 @@ class KidsnoteApp(QtWidgets.QWidget):
 
         # Table View
         self.table = QtWidgets.QTableWidget()
-        self.table.setColumnCount(6)
+        self.table.setColumnCount(7)
         # 테이블의 기본 높이를 확 줄여서(250), 초기 빈 상태에선 앱 중앙 스크롤이 생기지 않도록 방지
         self.table.setMinimumHeight(FS(250))
-        self.table.setHorizontalHeaderLabels(['선택', '날짜', '제목', '종류', '작성자', '사진'])
+        self.table.setHorizontalHeaderLabels(['선택', '날짜', '제목', '종류', '작성자', '사진', '백업'])
         self.table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.Fixed)
         self.table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.Stretch)
         self.table.setColumnWidth(0, FS(40))
@@ -645,6 +732,7 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.table.setColumnWidth(3, FS(70))   # 종류: 알림장/앨범
         self.table.setColumnWidth(4, FS(180))  # 작성자: "2025 GREEN 교사" 등
         self.table.setColumnWidth(5, FS(45))   # 사진: O/X
+        self.table.setColumnWidth(6, FS(50))   # 백업: 이전에 받은 항목 O 표시
         self.table.setSortingEnabled(True)
         table_layout.addWidget(self.table)
         
@@ -720,6 +808,9 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.filetype_btn_group.addButton(self.photo_radio)
         radio_layout.addWidget(self.pdf_radio)
         radio_layout.addWidget(self.photo_radio)
+        self.chk_exclude_video = QtWidgets.QCheckBox("동영상 제외")
+        self.chk_exclude_video.setToolTip("체크하면 사진만 받고 동영상은 건너뜁니다 (용량 절약)")
+        radio_layout.addWidget(self.chk_exclude_video)
         filetype_group_box.setLayout(radio_layout)
 
         # Overwrite Option Group
@@ -748,7 +839,8 @@ class KidsnoteApp(QtWidgets.QWidget):
         options_group.setLayout(options_layout)
         main_layout.addWidget(options_group)
 
-        # Download Button
+        # Download Button + Pause Button
+        download_row = QtWidgets.QHBoxLayout()
         self.download_btn = QtWidgets.QPushButton('3. 선택한 항목 다운로드 시작')
         self.download_btn.clicked.connect(self.start_download)
         self.download_btn.setEnabled(False)
@@ -758,7 +850,15 @@ class KidsnoteApp(QtWidgets.QWidget):
             QPushButton:hover {{ background-color: #E6B000; }}
             QPushButton:disabled {{ background-color: #FFDE59; color: #8A94A6; }}
         """)
-        main_layout.addWidget(self.download_btn)
+        download_row.addWidget(self.download_btn, stretch=4)
+
+        self.pause_btn = QtWidgets.QPushButton('일시정지')
+        self.pause_btn.clicked.connect(self.toggle_pause)
+        self.pause_btn.setEnabled(False)
+        self.pause_btn.setFixedHeight(FS(40))
+        self.pause_btn.setToolTip("현재 항목까지 마친 뒤 잠시 멈춥니다. 다시 누르면 이어서 진행합니다.")
+        download_row.addWidget(self.pause_btn, stretch=1)
+        main_layout.addLayout(download_row)
 
         # (QScrollArea 제거됨: 레이아웃이 self에 직접 연결되었으므로 추가 설정 불필요)
 
@@ -1173,17 +1273,21 @@ class KidsnoteApp(QtWidgets.QWidget):
             self.run_on_ui_thread(self._show_stage2_lock_overlay)
 
             self.run_on_ui_thread(lambda: self.login_btn.setText("✅ 로그인 완료"))
-            # 로그인 직후 메뉴 페이지로 완벽하게 넘어갈 때까지 여유있게 대기 후 명시적 주소 이동
+            # 로그인 처리(URL 전환)가 끝나는 즉시 진행 — 기존 고정 5초/4초 대기 제거
             import time
-            time.sleep(5)
+            try:
+                WebDriverWait(self.driver, 12).until(lambda d: "/login" not in d.current_url)
+            except Exception:
+                pass
             if "kidsnote.com/service" not in self.driver.current_url:
                 self.driver.get("https://www.kidsnote.com/service")
-                time.sleep(4)
-            
+            # 프로필 아바타가 렌더링되는 즉시 진행 (최대 10초)
+            manager.wait_css(self.driver, "span[role='img']", timeout=10)
+
             # Wait until profile section loads (Check for size 65 active avatar)
             try:
                 WebDriverWait(self.driver, 60).until(EC.presence_of_element_located((By.XPATH, "//*[@size='65' and @role='img']")))
-                time.sleep(2) # 부가 컴포넌트 렌더링 대기
+                time.sleep(1) # 부가 컴포넌트(이름/나이 텍스트) 렌더링 대기
             except:
                 pass
                 
@@ -1562,6 +1666,53 @@ class KidsnoteApp(QtWidgets.QWidget):
                     checkbox.blockSignals(False)
         self.update_selection_label()
 
+    def select_new_only(self):
+        """증분 백업: 이 PC에서 아직 받은 적 없는 항목만 체크."""
+        for i in range(self.table.rowCount()):
+            if self.table.isRowHidden(i):
+                continue
+            chk_widget = self.table.cellWidget(i, 0)
+            checkbox = chk_widget.findChild(QtWidgets.QCheckBox) if chk_widget else None
+            if not checkbox:
+                continue
+            title_item = self.table.item(i, 2)
+            idx = title_item.data(QtCore.Qt.UserRole) if title_item else None
+            is_new = True
+            if idx is not None and 0 <= idx < len(self.memories):
+                is_new = self.memories[idx].get('id') not in self.downloaded_ids
+            checkbox.blockSignals(True)
+            checkbox.setChecked(is_new)
+            checkbox.blockSignals(False)
+        self.update_selection_label()
+
+    def _refresh_backup_marks(self):
+        """다운로드 완료 후 테이블의 '백업' 컬럼 표시 갱신."""
+        for i in range(self.table.rowCount()):
+            title_item = self.table.item(i, 2)
+            if not title_item:
+                continue
+            idx = title_item.data(QtCore.Qt.UserRole)
+            if idx is None or not (0 <= idx < len(self.memories)):
+                continue
+            mark = "O" if self.memories[idx].get('id') in self.downloaded_ids else ""
+            cell = self.table.item(i, 6)
+            if cell:
+                cell.setText(mark)
+            else:
+                self.table.setItem(i, 6, QtWidgets.QTableWidgetItem(mark))
+
+    def toggle_pause(self):
+        if not (self.is_downloading and self.download_thread):
+            return
+        if getattr(self.download_thread, '_paused', False):
+            self.download_thread.resume()
+            self.pause_btn.setText('일시정지')
+            self.update_status("다운로드를 재개합니다...")
+        else:
+            self.download_thread.pause()
+            self.pause_btn.setText('▶ 재개')
+            self.update_status("현재 항목까지 마친 뒤 일시정지합니다...")
+
     def update_selection_label(self):
         total = 0
         selected = 0
@@ -1615,7 +1766,9 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.table.setItem(i, 3, QtWidgets.QTableWidgetItem(mem['type']))
         self.table.setItem(i, 4, QtWidgets.QTableWidgetItem(mem.get('writer', '알 수 없음')))
         self.table.setItem(i, 5, QtWidgets.QTableWidgetItem(mem.get('has_photo', 'X')))
-        
+        backed_mark = "O" if mem.get('id') in self.downloaded_ids else ""
+        self.table.setItem(i, 6, QtWidgets.QTableWidgetItem(backed_mark))
+
         self.table.setSortingEnabled(True) # 다시 활성화
         self.table.scrollToBottom()
         self.update_selection_label()
@@ -1650,9 +1803,38 @@ class KidsnoteApp(QtWidgets.QWidget):
                 msg = "수집이 중지되었습니다. 가져온 항목이 없습니다."
                 self.update_status(msg)
                 self._show_top_message(QtWidgets.QMessageBox.Information, "중단됨", msg)
+                return
+
+            # 진단 정보로 '정상 조회했으나 0건'과 '조회 자체 실패'를 구분해 안내
+            info = getattr(self.scrape_thread, 'result_info', None) or {}
+            period_text = self.period_combo.currentText().split()[0] if self.period_combo.currentText() else "선택한 기간"
+
+            if info.get('filtered_out', 0) > 0:
+                # 목록은 정상적으로 열렸고 게시물도 있었지만, 전부 조회 기간보다 오래된 항목
+                msg = (
+                    f"목록은 정상적으로 확인했습니다.\n\n"
+                    f"다만 게시물이 모두 [{period_text}] 조회 기간보다 오래되어 결과가 0건입니다.\n"
+                    f"조회 기간을 더 길게 설정한 뒤 다시 시도해 보세요."
+                )
+                self.update_status(f"조회 완료: [{period_text}] 기간 내 게시물 0건")
+                self._show_top_message(QtWidgets.QMessageBox.Information, "기간 내 게시물 없음", msg)
+            elif info.get('list_loaded') and info.get('items_seen', 0) == 0:
+                # 목록 화면은 열렸지만 게시물 자체가 하나도 없음 (신규 계정 등)
+                msg = (
+                    "목록 페이지는 정상적으로 열렸지만 게시물이 하나도 없습니다.\n\n"
+                    "선택한 아이가 맞는지, 알림장/앨범 체크 항목이 맞는지 확인해 주세요."
+                )
+                self.update_status("조회 완료: 게시물 0건")
+                self._show_top_message(QtWidgets.QMessageBox.Information, "게시물 없음", msg)
             else:
-                msg = "가져온 알림장/앨범이 없거나 수집 대기 시간 초과입니다.\n\n사내망 등 네트워크 환경이 너무 느리거나 일시적인 장애로 목록 페이지를 띄우지 못했을 수 있습니다.\n잠시 후 다시 [목록 불러오기]를 시도해 주세요.\n(캐시가 쌓여 두 세번째 시도 땐 더 빠릅니다!)"
-                self.update_status("수집 실패: 네트워크 응답 지연 또는 게시물 0건")
+                # 목록 화면 진입 실패 또는 게시물 로딩 타임아웃 → 네트워크/일시 장애 안내
+                msg = (
+                    "목록 페이지를 여는 데 실패했거나 게시물 로딩이 시간 초과되었습니다.\n\n"
+                    "사내망 등 네트워크 환경이 너무 느리거나 일시적인 장애일 수 있습니다.\n"
+                    "잠시 후 다시 [목록 불러오기]를 시도해 주세요.\n"
+                    "(캐시가 쌓여 두 세번째 시도 땐 더 빠릅니다!)"
+                )
+                self.update_status("수집 실패: 목록 페이지 로딩 시간 초과")
                 self._show_top_message(QtWidgets.QMessageBox.Warning, "목록 가져오기 실패", msg)
             return
 
@@ -1701,9 +1883,15 @@ class KidsnoteApp(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "경고", "저장 경로를 지정해주세요.")
             return
 
+        self._launch_download_thread(selected_indices)
+
+    def _launch_download_thread(self, selected_indices):
+        """선택된 인덱스 목록으로 다운로드 스레드를 기동. '실패만 재시도'에서도 재사용."""
+        target_dir = self.dir_input.text()
         self.stop_flag = False
         is_pdf = self.pdf_radio.isChecked()
         is_single_folder = self.folder_single_radio.isChecked()
+        include_video = not self.chk_exclude_video.isChecked()
 
         # 아이 이름: 콤보박스 텍스트에서 첫 단어(이름)만 콕직으로 추출 및 특수문자 제거
         profile_name = "알수없음"
@@ -1720,6 +1908,8 @@ class KidsnoteApp(QtWidgets.QWidget):
         # 다운로드 중 목록 재수집/아이 전환이 같은 드라이버를 건드리지 못하도록 잠금
         self._set_shared_controls_enabled(False)
         self.stop_btn.setEnabled(True)
+        self.pause_btn.setEnabled(True)
+        self.pause_btn.setText('일시정지')
         self.is_downloading = True
         self.update_progress(0)
         self.update_status(f"다운로드 준비 중... 선택 {len(selected_indices)}개")
@@ -1739,6 +1929,7 @@ class KidsnoteApp(QtWidgets.QWidget):
             is_single_folder,
             profile_name,
             is_overwrite_allow,
+            include_video,
         )
         self.download_thread.status_signal.connect(self.update_status)
         self.download_thread.progress_signal.connect(self.update_progress)
@@ -1752,8 +1943,31 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.is_downloading = False
         self.download_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
+        self.pause_btn.setEnabled(False)
+        self.pause_btn.setText('일시정지')
         self._set_shared_controls_enabled(True)
-        self._show_download_complete(target_dir, success_cnt, fail_cnt, is_stopped)
+
+        finished_thread = self.download_thread
+
+        # 증분 백업 기록: 성공 항목 id를 저장하고 테이블 '백업' 표시 갱신
+        succeeded = [i for i in (getattr(finished_thread, 'succeeded_ids', None) or []) if i]
+        if succeeded:
+            self.downloaded_ids.update(succeeded)
+            self._save_manifest(self.downloaded_ids)
+            self._refresh_backup_marks()
+
+        elapsed_sec = getattr(finished_thread, 'elapsed_sec', 0)
+        self._show_download_complete(target_dir, success_cnt, fail_cnt, is_stopped, elapsed_sec)
+
+        # 실패 항목만 재시도 제안 (사용자가 중지한 경우 제외)
+        failed = list(getattr(finished_thread, 'failed_indices', None) or [])
+        if failed and not is_stopped:
+            reply = self._show_top_question(
+                "실패 항목 재시도",
+                f"다운로드에 실패한 {len(failed)}건이 있습니다.\n실패한 항목만 다시 시도할까요?"
+            )
+            if reply == QtWidgets.QMessageBox.Yes:
+                self._launch_download_thread(failed)
 
     @QtCore.pyqtSlot()
     def _ensure_download_finished(self):
@@ -1762,17 +1976,22 @@ class KidsnoteApp(QtWidgets.QWidget):
             self.is_downloading = False
             self.download_btn.setEnabled(True)
             self.stop_btn.setEnabled(False)
+            self.pause_btn.setEnabled(False)
+            self.pause_btn.setText('일시정지')
             self._set_shared_controls_enabled(True)
             self.update_status("다운로드가 비정상 종료되었습니다. 로그를 확인해 주세요.")
 
-    @QtCore.pyqtSlot(str, int, int, bool)
-    def _show_download_complete(self, target_dir, success_cnt, fail_cnt, is_stopped):
+    def _show_download_complete(self, target_dir, success_cnt, fail_cnt, is_stopped, elapsed_sec=0):
         self.tray_icon.showMessage("키즈노트 다운로더", f"다운로드 완료 (성공: {success_cnt}, 실패/건너뜀: {fail_cnt})", QtWidgets.QSystemTrayIcon.Information, 5000)
-        
+
         status_msg = f"총 {success_cnt+fail_cnt}개 중 성공: {success_cnt}건, 실패/건너뜀: {fail_cnt}건\n"
+        if elapsed_sec:
+            minutes, seconds = divmod(int(elapsed_sec), 60)
+            status_msg += f"소요 시간: {minutes}분 {seconds}초\n" if minutes else f"소요 시간: {seconds}초\n"
+        status_msg += f"저장 위치: {target_dir}\n"
         if is_stopped:
             status_msg += "\n(다운로드가 사용자에 의해 중도 중지되었습니다.)\n"
-            
+
         reply = self._show_top_question("다운로드 완료", status_msg + "\n지금 폴더를 열어보시겠습니까?")
         
         if reply == QtWidgets.QMessageBox.Yes:

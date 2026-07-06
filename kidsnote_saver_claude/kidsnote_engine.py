@@ -94,6 +94,21 @@ def unprotect_secret(stored):
         return ""
 
 
+def wait_css(driver, selector, timeout=10, poll=0.2):
+    """selector에 해당하는 엘리먼트가 나타나는 '즉시' 진행하는 대기.
+
+    고정 time.sleep 대신 사용 — 페이지가 이미 떠 있으면 0.2초 만에 통과하므로
+    불필요한 대기 체감을 없애고, 느린 환경에서는 timeout까지 기다려 준다.
+    """
+    try:
+        WebDriverWait(driver, timeout, poll_frequency=poll).until(
+            lambda d: d.find_elements(By.CSS_SELECTOR, selector)
+        )
+        return True
+    except Exception:
+        return False
+
+
 def normalize_media_url(driver, url):
     """Browser에서 보이는 이미지/동영상 URL을 requests가 받을 수 있는 절대 URL로 정리합니다."""
     if not url:
@@ -249,6 +264,39 @@ def _media_prefix(post_info):
     item_type = post_info.get('type', '사진')
     return f"{date_prefix}_{item_type}" if post_index == 0 else f"{date_prefix}_{item_type}_{post_index}"
 
+
+def _post_timestamp(post_info):
+    """게시물 날짜를 파일 타임스탬프(epoch)로 변환. 실패 시 None.
+
+    저장된 사진/PDF의 파일 시간을 게시물 날짜로 맞춰
+    갤러리/탐색기에서 실제 추억 순서대로 정렬되게 한다.
+    """
+    import re
+    date_str = post_info.get("date", "") or ""
+    match_dot = re.search(r'(\d{4})\.?\s*(\d{1,2})\.?\s*(\d{1,2})', date_str)
+    match_kor = re.search(r'(?:(\d{4})\s*년)?\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일', date_str)
+    try:
+        if match_dot:
+            y, m, d = match_dot.groups()
+        elif match_kor:
+            y = match_kor.group(1) or datetime.date.today().year
+            m = match_kor.group(2)
+            d = match_kor.group(3)
+        else:
+            return None
+        return datetime.datetime(int(y), int(m), int(d), 12, 0, 0).timestamp()
+    except Exception:
+        return None
+
+
+def _apply_post_timestamp(path, post_info):
+    ts = _post_timestamp(post_info)
+    if ts:
+        try:
+            os.utime(path, (ts, ts))
+        except OSError:
+            pass
+
 def save_debug_snapshot(driver, step_name, log_func=print, mem=None):
     """
     현재 브라우저 창의 HTML 소스와 스크린샷을 지정된 폴더에 타임스탬프와 함께 저장합니다.
@@ -287,11 +335,14 @@ def save_debug_snapshot(driver, step_name, log_func=print, mem=None):
         log_func(f"[DEBUG LOG] 스냅샷 저장 실패: {e}")
 
 
-def _scrape_list_pages(driver, item_type, memories, log, item_found_callback=None, check_stop_callback=None, limit_date_str=None, child_name=None):
+def _scrape_list_pages(driver, item_type, memories, log, item_found_callback=None, check_stop_callback=None, limit_date_str=None, child_name=None, result_info=None):
     """
     Helper to scrape all pages of a list (Report or Album).
     Yields or callbacks items as they are found.
+    result_info(dict)에 조회 결과 진단 정보를 기록해 GUI가
+    '기간 내 항목 없음'과 '네트워크 실패'를 구분해 안내할 수 있게 한다.
     """
+    info = result_info if isinstance(result_info, dict) else {}
     page_count = 1
     log(f"DEBUG: _scrape_list_pages 시작. 대상: {item_type}, 현재 URL: {driver.current_url}")
     while True:
@@ -308,11 +359,14 @@ def _scrape_list_pages(driver, item_type, memories, log, item_found_callback=Non
         except TimeoutException:
             log(f"DEBUG: TimeoutException 발생. 현재 URL: {driver.current_url}")
             log(f"{item_type} {page_count}페이지 게시물을 찾을 수 없습니다.")
+            info['timeout'] = True
             save_debug_snapshot(driver, f"Timeout_{item_type}_Page{page_count}", log)
             break
-        
+
+        info['list_loaded'] = True
         post_items = driver.find_elements(By.XPATH, "//div[contains(@class, 'exa4ze60') or contains(@class, 'css-220836')]")
         total_items = len(post_items)
+        info['items_seen'] = info.get('items_seen', 0) + total_items
         log(f"DEBUG: 게시물 항목을 {total_items}개 찾음.")
 
         # ── 첫 번째 항목의 부모 요소를 포함한 HTML 저장 (교사명 위치 파악용, 디버그 모드 전용) ──
@@ -408,6 +462,7 @@ def _scrape_list_pages(driver, item_type, memories, log, item_found_callback=Non
                         log(f"DEBUG: 게시물 날짜({date})가 제한 날짜({limit_date_str})보다 이전이므로 이 페이지부터 탐색을 중단합니다.")
                         # 리스트는 최신순이므로 하나라도 더 과거라면 뒷페이지는 전부 스킵합니다.
                         filtered_items_count += 1
+                        info['filtered_out'] = info.get('filtered_out', 0) + 1
                         return
                 
                 item_id = f"{item_type}_{date}_{title}_{url}"
@@ -485,8 +540,9 @@ def navigate_to_memory_view(driver, item_type_label, log_func, target_child=None
     """
     try:
         driver.get("https://www.kidsnote.com/service")
-        time.sleep(2)
-        
+        # 프로필 아바타가 렌더링되는 즉시 진행 (고정 2초 대기 제거)
+        wait_css(driver, "span[role='img']", timeout=10)
+
         if target_child:
             try:
                 log_func(f"아이 전환 확인 중 (이름: {target_child})...")
@@ -505,7 +561,7 @@ def navigate_to_memory_view(driver, item_type_label, log_func, target_child=None
                 driver.execute_script(script, target_child)
                 time.sleep(0.5)
                 driver.get("https://www.kidsnote.com/service")
-                time.sleep(1)
+                wait_css(driver, "span[role='img']", timeout=10)
             except Exception as e:
                 log_func(f"아이 전환 중 예외 (무시): {e}")
 
@@ -537,9 +593,10 @@ def navigate_to_memory_view(driver, item_type_label, log_func, target_child=None
 
         # 전체보기 클릭
         try:
-            # SPA 렌더링 시간 확보를 위한 대기 (안정성 핵심)
-            time.sleep(1.5)
-            
+            # /service를 새로 로드한 직후라 이전 화면 잔상이 없으므로 최소 안정화만 두고
+            # 실제 대기는 아래 WebDriverWait(전체보기 버튼 감지)가 담당 → 뜨는 즉시 진행
+            time.sleep(0.3)
+
             if item_type_label == "앨범":
                 try:
                     target_btn = WebDriverWait(driver, 10).until(
@@ -564,8 +621,8 @@ def navigate_to_memory_view(driver, item_type_label, log_func, target_child=None
 
         # 목록 항목 대기
         try:
-            # SPA 화면 전환 후 이전 상태를 오인하지 않도록 1.5초 안정화
-            time.sleep(1.5)
+            # 아래 WebDriverWait가 게시물 감지 즉시 통과하므로 고정 안정화는 최소화
+            time.sleep(0.3)
             WebDriverWait(driver, 30).until(
                 EC.presence_of_element_located((By.XPATH, "//div[contains(@class,'exa4ze60') or contains(@class,'css-220836')]"))
             )
@@ -579,22 +636,25 @@ def navigate_to_memory_view(driver, item_type_label, log_func, target_child=None
         
 
 
-def fetch_memory_list(driver, status_callback=None, item_found_callback=None, check_stop_callback=None, scrape_reports=True, scrape_albums=True, profile_found_callback=None, limit_date_str=None, child_name=None):
+def fetch_memory_list(driver, status_callback=None, item_found_callback=None, check_stop_callback=None, scrape_reports=True, scrape_albums=True, profile_found_callback=None, limit_date_str=None, child_name=None, result_info=None):
     """
     Fetches the list of memories by navigating directly to /service/report and /service/album.
     If child_name is provided, navigate to /service first and click the child with that name.
+    result_info(dict)를 넘기면 조회 결과 진단 정보(list_loaded/items_seen/filtered_out/timeout/nav_failed)를 기록한다.
     """
     def log(msg):
         print(msg) # 터미널에도 출력
         if status_callback and 'DEBUG' not in msg:
             status_callback(msg)
 
+    info = result_info if isinstance(result_info, dict) else {}
     memories = []
 
     # 0. 항상 /service 로 이동 후 아이 전환
     log("서비스 페이지로 이동 중...")
     driver.get("https://www.kidsnote.com/service")
-    time.sleep(1) # React Hydration 여유 시간 (너무 길지 않게)
+    # React Hydration 완료(아바타 렌더링)를 감지하는 즉시 진행 (고정 1초 대기 제거)
+    wait_css(driver, "span[role='img']", timeout=10)
 
     if child_name is not None:
         try:
@@ -613,10 +673,10 @@ def fetch_memory_list(driver, status_callback=None, item_found_callback=None, ch
             """
             driver.execute_script(script, child_name)
             time.sleep(0.5) # 클릭 후 정보 변경 대기
-            
+
             # 아이 전환 직후에는 라우팅 꼬임을 방지하기 위해 홈으로 리프레시
             driver.get("https://www.kidsnote.com/service")
-            time.sleep(1)
+            wait_css(driver, "span[role='img']", timeout=10)
         except Exception as e:
             log(f"아이 전환 중 오류 (무시됨): {e}")
 
@@ -702,7 +762,9 @@ def fetch_memory_list(driver, status_callback=None, item_found_callback=None, ch
         try:
             if navigate_to_memory_view(driver, "알림장", log, target_child=None):
                 log("알림장 전수 조사를 시작합니다...")
-                _scrape_list_pages(driver, "알림장", memories, log, item_found_callback, check_stop_callback, limit_date_str, child_name)
+                _scrape_list_pages(driver, "알림장", memories, log, item_found_callback, check_stop_callback, limit_date_str, child_name, result_info=info)
+            else:
+                info['nav_failed'] = True
         except Exception as e:
             log(f"알림장 조회 실패: {type(e).__name__} - {str(e)}")
 
@@ -713,7 +775,9 @@ def fetch_memory_list(driver, status_callback=None, item_found_callback=None, ch
         try:
             if navigate_to_memory_view(driver, "앨범", log, target_child=None):
                 log("앨범 전수 조사를 시작합니다...")
-                _scrape_list_pages(driver, "앨범", memories, log, item_found_callback, check_stop_callback, limit_date_str, child_name)
+                _scrape_list_pages(driver, "앨범", memories, log, item_found_callback, check_stop_callback, limit_date_str, child_name, result_info=info)
+            else:
+                info['nav_failed'] = True
         except Exception as e:
             log(f"앨범 조회 실패: {type(e).__name__} - {str(e)}")
 
@@ -852,16 +916,18 @@ def download_as_pdf(driver, post_info, target_path, status_callback=None, check_
         
         with open(target_path, "wb") as f:
             f.write(base64.b64decode(result['data']))
-            
+        _apply_post_timestamp(target_path, post_info)
+
         log("PDF 저장 완료.")
         return True
     except Exception as e:
         log(f"PDF 저장 오류: {e}")
         return False
 
-def download_photos_only(driver, post_info, target_dir, status_callback=None, check_stop_callback=None):
+def download_photos_only(driver, post_info, target_dir, status_callback=None, check_stop_callback=None, include_video=True):
     """
     Downloads only images from the currently open post detail page.
+    include_video=False면 동영상(video/source 태그, 동영상 확장자)은 건너뛴다.
     """
     def log(msg):
         if status_callback and 'DEBUG' not in msg:
@@ -953,6 +1019,12 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
                 continue
 
             lower_src = src.lower()
+            if not include_video:
+                if item.get("kind") in ("video", "source"):
+                    continue
+                path_part = lower_src.split("?")[0]
+                if any(path_part.endswith("." + ext) for ext in ("mp4", "webm", "mov", "m4v", "avi", "m3u8")):
+                    continue
             width = int(item.get("w") or 0)
             height = int(item.get("h") or 0)
             is_tiny_ui_asset = 0 < max(width, height) <= 96
@@ -996,6 +1068,7 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
                 if os.path.exists(file_path):
                     os.remove(file_path)
                 os.replace(tmp_path, file_path)
+                _apply_post_timestamp(file_path, post_info)
                 count += 1
             except Exception as req_e:
                 try:
@@ -1019,7 +1092,7 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
         log(f"사진/동영상 다운로드 오류: {e}")
         return False
 
-def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None, is_overwrite_allow=True, check_stop_callback=None):
+def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None, is_overwrite_allow=True, check_stop_callback=None, include_video=True):
     """
     Handles robust navigation to the detail page and downloads it.
     """
@@ -1062,7 +1135,7 @@ def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None,
         if is_pdf:
             return download_as_pdf(driver, mem, target_path_or_dir, status_callback, check_stop_callback)
         else:
-            return download_photos_only(driver, mem, target_path_or_dir, status_callback, check_stop_callback)
+            return download_photos_only(driver, mem, target_path_or_dir, status_callback, check_stop_callback, include_video)
             
     # Need to navigate
     try:
@@ -1203,7 +1276,7 @@ def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None,
             if is_pdf:
                 res = download_as_pdf(driver, mem, target_path_or_dir, status_callback, check_stop_callback)
             else:
-                res = download_photos_only(driver, mem, target_path_or_dir, status_callback, check_stop_callback)
+                res = download_photos_only(driver, mem, target_path_or_dir, status_callback, check_stop_callback, include_video)
             
             # 다운로드 완료 후 뒤로가기를 호출하여 리스트 상태로 복귀!! (이것이 속도의 핵심)
             driver.back()
