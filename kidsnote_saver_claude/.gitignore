@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Local environments
+venv/
+.venv/
+venv_build/
+
+# PyInstaller outputs
+build/
+dist/
+*.spec
+
+# Release binaries and archives
+*.exe
+*.zip
+Kidsnote_Release*/
+
+# Edge WebDriver binaries/caches
+msedgedriver.exe
+driver_*/
+
+# Local debug and E2E artifacts
+Kidsnote_Debug_Logs/
+debug_*.html
+kidsnote_*_e2e*/
+kidsnote_e2e*/
+kidsnote_full_e2e*/
+kidsnote_logincheck_*/
+kidsnote_childswitch_*/
+kidsnote_pdf_single_e2e*/
+
+# Local config/logs
+*.log
+*.ini
+*.part
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
