@@ -94,6 +94,27 @@ def unprotect_secret(stored):
         return ""
 
 
+# 게시물 카드에서 '작성자 줄'을 식별하기 위한 호칭 키워드
+_WRITER_KEYWORDS = (
+    '교사', '선생님', '원장', '엄마', '아빠', '어머니', '아버지', '어머님', '아버님',
+    '할머니', '할아버지', '외할머니', '외할아버지', '이모', '고모', '삼촌', '보호자',
+)
+
+
+def _is_on_service_home(driver):
+    """현재 /service 홈(하위 경로 없이)에 떠 있고 아바타가 렌더링된 상태인지 확인.
+
+    반복 조회 시 불필요한 SPA 전체 리로드를 생략하기 위한 판별용.
+    """
+    try:
+        current = (driver.current_url or "").split('?')[0].split('#')[0].rstrip('/')
+        if not current.endswith('kidsnote.com/service'):
+            return False
+        return bool(driver.find_elements(By.CSS_SELECTOR, "span[role='img']"))
+    except Exception:
+        return False
+
+
 def wait_css(driver, selector, timeout=10, poll=0.2):
     """selector에 해당하는 엘리먼트가 나타나는 '즉시' 진행하는 대기.
 
@@ -394,20 +415,21 @@ def _scrape_list_pages(driver, item_type, memories, log, item_found_callback=Non
                 log("알림장/앨범 수집이 사용자에 의해 중지되었습니다.")
                 return
             try:
-                # 알림장: 카드에 교사명 별도 표시 없음 → "선생님" 고정
-                # 앨범: 카드 텍스트에 "2025 GREEN 교사" 같은 줄이 있음 → 추출
-                writer = "선생님"
-                if item_type == "앨범":
-                    writer = "알 수 없음"
-                    try:
-                        card_text = post.text or ""
-                        for line in card_text.split('\n'):
-                            line = line.strip()
-                            if line and '교사' in line:
-                                writer = line
-                                break
-                    except Exception:
-                        pass
+                # 작성자 추출: 카드 텍스트에서 호칭(교사/엄마/아빠 등)이 포함된 짧은 줄을 찾는다.
+                # 알림장은 부모(보호자)가 쓴 글도 있으므로 '선생님' 고정 표기 대신 실제 표시된 작성자를 사용.
+                # 본문 문장 오인을 줄이기 위해 25자 이하의 줄만 후보로 본다 (작성자 줄은 "김OO 엄마"처럼 짧음).
+                writer = "알 수 없음"
+                try:
+                    card_text = post.text or ""
+                    for line in card_text.split('\n'):
+                        line = line.strip()
+                        if not line or len(line) > 25:
+                            continue
+                        if any(k in line for k in _WRITER_KEYWORDS):
+                            writer = line
+                            break
+                except Exception:
+                    pass
 
                 # 사진 유무 판별 (img 태그가 하나라도 있으면 O)
                 has_photo = "O" if len(post.find_elements(By.TAG_NAME, "img")) > 0 else "X"
@@ -539,7 +561,9 @@ def navigate_to_memory_view(driver, item_type_label, log_func, target_child=None
     URL이 누락된 항목을 수집하거나 탐색할 때 SPA의 뷰 버퍼를 재동기화하는 강력한 방법입니다.
     """
     try:
-        driver.get("https://www.kidsnote.com/service")
+        # 이미 /service 홈에 떠 있으면(반복 조회 등) SPA 전체 리로드를 생략해 시간 절약
+        if not _is_on_service_home(driver):
+            driver.get("https://www.kidsnote.com/service")
         # 프로필 아바타가 렌더링되는 즉시 진행 (고정 2초 대기 제거)
         wait_css(driver, "span[role='img']", timeout=10)
 
@@ -650,33 +674,39 @@ def fetch_memory_list(driver, status_callback=None, item_found_callback=None, ch
     info = result_info if isinstance(result_info, dict) else {}
     memories = []
 
-    # 0. 항상 /service 로 이동 후 아이 전환
+    # 0. /service 홈으로 이동 후 아이 전환 (이미 홈이면 리로드 생략)
     log("서비스 페이지로 이동 중...")
-    driver.get("https://www.kidsnote.com/service")
+    if not _is_on_service_home(driver):
+        driver.get("https://www.kidsnote.com/service")
     # React Hydration 완료(아바타 렌더링)를 감지하는 즉시 진행 (고정 1초 대기 제거)
     wait_css(driver, "span[role='img']", timeout=10)
 
     if child_name is not None:
         try:
-            log(f"아이 전환 중 (이름: {child_name})...")
+            log(f"아이 전환 확인 중 (이름: {child_name})...")
+            # 대상 아이 아바타가 이미 활성(size=65) 상태면 'already'를 반환해
+            # 클릭·리로드를 통째로 생략한다 → 같은 아이로 반복 조회 시 크게 빨라짐.
             script = """
                 var target = arguments[0];
                 var spans = document.querySelectorAll("span[role='img']");
                 for(var i=0; i<spans.length; i++){
                     var parent = spans[i].parentElement.parentElement;
                     if(parent && parent.innerText && parent.innerText.includes(target)) {
+                        if(spans[i].getAttribute('size') === '65') { return 'already'; }
                         spans[i].click();
-                        return true;
+                        return 'switched';
                     }
                 }
-                return false;
+                return 'notfound';
             """
-            driver.execute_script(script, child_name)
-            time.sleep(0.5) # 클릭 후 정보 변경 대기
-
-            # 아이 전환 직후에는 라우팅 꼬임을 방지하기 위해 홈으로 리프레시
-            driver.get("https://www.kidsnote.com/service")
-            wait_css(driver, "span[role='img']", timeout=10)
+            switch_result = driver.execute_script(script, child_name)
+            if switch_result == 'already':
+                log(f"DEBUG: '{child_name}' 이미 선택된 상태 → 전환/리로드 생략")
+            else:
+                time.sleep(0.5) # 클릭 후 정보 변경 대기
+                # 아이 전환 직후에는 라우팅 꼬임을 방지하기 위해 홈으로 리프레시
+                driver.get("https://www.kidsnote.com/service")
+                wait_css(driver, "span[role='img']", timeout=10)
         except Exception as e:
             log(f"아이 전환 중 오류 (무시됨): {e}")
 
