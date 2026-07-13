@@ -10,6 +10,18 @@ if not exist "%DRIVER_PATH%" set "DRIVER_PATH=%PROJECT_ROOT%\msedgedriver.exe"
 set "APP_NAME=Kidsnote_Memories_Saver_V1.00"
 set "RELEASE_DIR=Kidsnote_Release_V1.00"
 
+REM 빌드 모드: 기본 onefile(단일 exe). "build_release_v1.bat onedir"로 실행하면
+REM 폴더 배포 빌드가 되어 PyInstaller 임시폴더(MEIxxxx) 추출/삭제 과정이 아예 없음.
+REM 사내 PC처럼 보안 프로그램이 임시폴더를 잠가 종료 시 경고가 뜨는 환경에 권장.
+set "BUILD_MODE=%~1"
+if "%BUILD_MODE%"=="" set "BUILD_MODE=onefile"
+if /I "%BUILD_MODE%"=="onedir" (
+    set "MODE_FLAG=--onedir"
+    set "RELEASE_DIR=Kidsnote_Release_V1.00_onedir"
+) else (
+    set "MODE_FLAG=--onefile"
+)
+
 echo ===================================================
 echo [Kidsnote Memories Saver V1.00] Release Build
 echo ===================================================
@@ -35,8 +47,8 @@ if exist "%RELEASE_DIR%.zip" del /q "%RELEASE_DIR%.zip"
 echo Done.
 echo.
 
-echo 2. Building one-file exe with PyInstaller...
-"%BUILD_PY%" -m PyInstaller --noconfirm --onefile --windowed --hidden-import selenium --hidden-import requests --collect-all selenium --collect-all PIL --add-binary "%DRIVER_PATH%;." --add-data "%SCRIPT_DIR%kidsnote_engine.py;." --add-data "%SCRIPT_DIR%kidsnote_icon.ico;." --name "%APP_NAME%" --icon "%SCRIPT_DIR%kidsnote_icon.ico" "%SCRIPT_DIR%kidsnote_saver.py"
+echo 2. Building %BUILD_MODE% exe with PyInstaller...
+"%BUILD_PY%" -m PyInstaller --noconfirm %MODE_FLAG% --windowed --hidden-import selenium --hidden-import requests --collect-all selenium --collect-all PIL --add-binary "%DRIVER_PATH%;." --add-data "%SCRIPT_DIR%kidsnote_engine.py;." --add-data "%SCRIPT_DIR%kidsnote_icon.ico;." --name "%APP_NAME%" --icon "%SCRIPT_DIR%kidsnote_icon.ico" "%SCRIPT_DIR%kidsnote_saver.py"
 if errorlevel 1 (
     echo ERROR: PyInstaller build failed.
     exit /b 1
@@ -46,16 +58,20 @@ echo.
 
 echo 3. Creating release folder...
 mkdir "%RELEASE_DIR%"
-copy /Y "dist\%APP_NAME%.exe" "%RELEASE_DIR%\"
+if /I "%BUILD_MODE%"=="onedir" (
+    xcopy /E /I /Y "dist\%APP_NAME%" "%RELEASE_DIR%\%APP_NAME%" >nul
+) else (
+    copy /Y "dist\%APP_NAME%.exe" "%RELEASE_DIR%\"
+)
 if errorlevel 1 (
-    echo ERROR: Failed to copy exe into release folder.
+    echo ERROR: Failed to copy build output into release folder.
     exit /b 1
 )
 echo Done.
 echo.
 
 echo 4. Creating release zip...
-"%BUILD_PY%" -c "import shutil; shutil.make_archive('Kidsnote_Release_V1.00', 'zip', 'Kidsnote_Release_V1.00')"
+"%BUILD_PY%" -c "import shutil; shutil.make_archive(r'%RELEASE_DIR%', 'zip', r'%RELEASE_DIR%')"
 if errorlevel 1 (
     echo ERROR: Failed to create zip.
     exit /b 1
@@ -64,6 +80,6 @@ echo Done.
 echo.
 
 echo ===================================================
-echo Release ready: %SCRIPT_DIR%%RELEASE_DIR%.zip
+echo Release ready: %SCRIPT_DIR%%RELEASE_DIR%.zip  (mode: %BUILD_MODE%)
 echo ===================================================
 endlocal

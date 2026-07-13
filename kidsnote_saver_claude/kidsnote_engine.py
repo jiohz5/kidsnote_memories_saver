@@ -189,6 +189,24 @@ def create_browser_session(driver):
     return session
 
 
+def probe_direct_access(driver, timeout=5):
+    """requests 세션이 브라우저 밖에서 키즈노트 서버에 직접 접근 가능한지 사전 점검.
+
+    사내망 프록시/PAC 환경에서는 브라우저(Edge)는 정상이어도 파이썬 requests의
+    직접 접근이 차단될 수 있고, 이 경우 사진/동영상 다운로드가 전부 실패한다.
+    다운로드 시작 전에 이 함수로 확인해 사용자에게 미리 경고한다.
+    """
+    try:
+        session = create_browser_session(driver)
+        response = _session_get(session, "https://www.kidsnote.com/", timeout=(timeout, timeout), stream=True, allow_redirects=True)
+        try:
+            return response.status_code < 500
+        finally:
+            response.close()
+    except Exception:
+        return False
+
+
 def fetch_bytes_with_browser_session(driver, url, session=None, referer=None, timeout=60):
     url = normalize_media_url(driver, url)
     if not url:
@@ -785,16 +803,46 @@ def fetch_memory_list(driver, status_callback=None, item_found_callback=None, ch
     except Exception as e:
         log(f"프로필 정보 획득 실패 (무시됨) - {e}")
 
+    def _scrape_type_with_retry(label):
+        """한 종류(알림장/앨범)를 조회하고, 비정상적으로 0건이면 강제 새로고침 후 1회 재시도.
+
+        SPA 상태가 꼬여 첫 조회가 조용히 실패하는 경우('조회 못 해놓고 완료' 증상)를
+        사용자가 다시 누르지 않아도 자동으로 복구한다.
+        """
+        for attempt in (1, 2):
+            attempt_info = {}
+            nav_ok = False
+            before = len(memories)
+            if navigate_to_memory_view(driver, label, log, target_child=None):
+                nav_ok = True
+                log(f"{label} 전수 조사를 시작합니다...")
+                _scrape_list_pages(driver, label, memories, log, item_found_callback, check_stop_callback, limit_date_str, child_name, result_info=attempt_info)
+            collected = len(memories) - before
+
+            abnormal_empty = collected == 0 and (not nav_ok or attempt_info.get('timeout'))
+            stopped = bool(check_stop_callback and check_stop_callback())
+            if attempt == 1 and abnormal_empty and not stopped:
+                log(f"{label} 조회가 비정상 종료되어 화면을 새로 고친 뒤 한 번 더 시도합니다...")
+                driver.get("https://www.kidsnote.com/service")
+                wait_css(driver, "span[role='img']", timeout=10)
+                continue
+
+            # 마지막 시도의 진단 정보만 최종 info에 반영 (재시도 성공 시 첫 실패 흔적은 제거)
+            if not nav_ok:
+                info['nav_failed'] = True
+            for key, value in attempt_info.items():
+                if isinstance(value, bool):
+                    info[key] = info.get(key) or value
+                else:
+                    info[key] = info.get(key, 0) + value
+            return
+
     # 2. 알림장 수집 — 추억보기 → 전체보기 진입
     if scrape_reports:
         if check_stop_callback and check_stop_callback(): return memories
         log("알림장 추억 목록 조회 중...")
         try:
-            if navigate_to_memory_view(driver, "알림장", log, target_child=None):
-                log("알림장 전수 조사를 시작합니다...")
-                _scrape_list_pages(driver, "알림장", memories, log, item_found_callback, check_stop_callback, limit_date_str, child_name, result_info=info)
-            else:
-                info['nav_failed'] = True
+            _scrape_type_with_retry("알림장")
         except Exception as e:
             log(f"알림장 조회 실패: {type(e).__name__} - {str(e)}")
 
@@ -803,11 +851,7 @@ def fetch_memory_list(driver, status_callback=None, item_found_callback=None, ch
         if check_stop_callback and check_stop_callback(): return memories
         log("앨범 추억 목록 조회 중...")
         try:
-            if navigate_to_memory_view(driver, "앨범", log, target_child=None):
-                log("앨범 전수 조사를 시작합니다...")
-                _scrape_list_pages(driver, "앨범", memories, log, item_found_callback, check_stop_callback, limit_date_str, child_name, result_info=info)
-            else:
-                info['nav_failed'] = True
+            _scrape_type_with_retry("앨범")
         except Exception as e:
             log(f"앨범 조회 실패: {type(e).__name__} - {str(e)}")
 
@@ -1114,7 +1158,15 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
                 
         log(f"{post_info['title']}: {count}개의 파일(사진/동영상) 다운로드 완료.")
         if count == 0:
-            log("다운로드할 사진/동영상을 찾지 못했습니다.")
+            # 실제로 아무것도 저장하지 못했으면 성공으로 위장하지 않는다.
+            # (사내망 프록시가 사진 서버를 차단하면 전부 여기로 떨어짐)
+            if media_srcs:
+                log(f"'{post_info.get('title', '')}': 미디어 {len(media_srcs)}개 다운로드 모두 실패 (네트워크 차단 가능성)")
+                return False
+            if str(post_info.get('has_photo', '')).upper() == 'O':
+                log(f"'{post_info.get('title', '')}': 사진이 있는 게시물인데 미디어 주소를 찾지 못했습니다.")
+                return False
+            log("이 게시물에는 다운로드할 사진/동영상이 없습니다.")
         elif failed_count:
             log(f"일부 파일은 접근 권한/네트워크 문제로 건너뛰었습니다. (실패 {failed_count}개)")
         return True

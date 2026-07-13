@@ -131,6 +131,7 @@ class DownloadThread(QtCore.QThread):
         self.failed_indices = []    # 실패한 원본 인덱스 → '실패만 재시도'에 사용
         self.succeeded_ids = []     # 성공한 항목 id → 증분 백업 기록에 사용
         self.elapsed_sec = 0
+        self.network_blocked = False  # 사전 점검에서 직접 접근 차단이 감지되면 True
 
     def stop(self):
         self.is_stopped = True
@@ -154,6 +155,16 @@ class DownloadThread(QtCore.QThread):
         started_at = time.time()
         try:
             write_app_log(f"Download thread started. selected={len(self.indices)} pdf={self.is_pdf} single_folder={self.is_single_folder}")
+
+            # 사진 모드는 requests 직접 접근이 필요하므로 시작 전에 접근 가능 여부를 점검.
+            # (PDF 모드는 브라우저 CDP로 저장하므로 점검 불필요)
+            if not self.is_pdf:
+                self.status_signal.emit("네트워크 직접 접근 사전 점검 중...")
+                if not manager.probe_direct_access(self.driver):
+                    self.network_blocked = True
+                    write_app_log("Direct network access probe failed (corporate proxy/PAC likely)")
+                    self.status_signal.emit("⚠ 사진 서버 직접 접근이 차단된 환경으로 보입니다. 다운로드가 실패할 수 있습니다.")
+
             date_type_counts = {}
             total = len(self.indices)
             self.progress_signal.emit(0)
@@ -1992,6 +2003,14 @@ class KidsnoteApp(QtWidgets.QWidget):
         if is_stopped:
             status_msg += "\n(다운로드가 사용자에 의해 중도 중지되었습니다.)\n"
 
+        network_blocked = bool(getattr(self.download_thread, 'network_blocked', False))
+        if network_blocked or (success_cnt == 0 and fail_cnt > 0 and not is_stopped):
+            status_msg += (
+                "\n⚠ 사진 서버 직접 접근이 차단된 환경으로 보입니다.\n"
+                "회사 등 보안 네트워크의 프록시가 원인일 수 있으며,\n"
+                "이 경우 가정 네트워크에서 다시 시도하시길 권장합니다.\n"
+            )
+
         reply = self._show_top_question("다운로드 완료", status_msg + "\n지금 폴더를 열어보시겠습니까?")
         
         if reply == QtWidgets.QMessageBox.Yes:
@@ -2071,6 +2090,17 @@ class KidsnoteApp(QtWidgets.QWidget):
         try:
             import subprocess
             subprocess.run(["taskkill", "/f", "/t", "/im", "msedgedriver.exe"], shell=False, timeout=5, creationflags=0x08000000)
+            # Selenium Manager 폴백으로 실행된 경우 selenium-manager.exe가 MEI 임시폴더 안에서
+            # 돌고 있을 수 있음 → 살아있으면 PyInstaller 임시폴더 삭제 실패 경고의 원인이 됨
+            subprocess.run(["taskkill", "/f", "/t", "/im", "selenium-manager.exe"], shell=False, timeout=5, creationflags=0x08000000)
+        except Exception:
+            pass
+
+        # 프로세스 강제 종료 후 파일 잠금이 풀릴 시간을 잠깐 확보
+        # (PyInstaller onefile의 임시폴더(MEIxxxx) 삭제 실패 경고 완화)
+        try:
+            import time as _time
+            _time.sleep(0.3)
         except Exception:
             pass
 
