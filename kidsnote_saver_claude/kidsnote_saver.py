@@ -72,12 +72,13 @@ class ScrapeThread(QtCore.QThread):
     profile_signal = QtCore.pyqtSignal(dict)
     finished_signal = QtCore.pyqtSignal(list)
 
-    def __init__(self, driver, scrape_reports=True, scrape_albums=True, limit_date_str=None, child_name=None):
+    def __init__(self, driver, scrape_reports=True, scrape_albums=True, limit_date_str=None, child_name=None, end_date_str=None):
         super().__init__()
         self.driver = driver
         self.scrape_reports = scrape_reports
         self.scrape_albums = scrape_albums
         self.limit_date_str = limit_date_str
+        self.end_date_str = end_date_str
         self.child_name = child_name
         self.is_stopped = False
         # 조회 결과 진단 정보 — GUI가 '기간 내 항목 없음'과 '네트워크 실패'를 구분해 안내
@@ -95,7 +96,8 @@ class ScrapeThread(QtCore.QThread):
                 profile_found_callback=self.profile_signal.emit,
                 limit_date_str=self.limit_date_str,
                 child_name=self.child_name,
-                result_info=self.result_info
+                result_info=self.result_info,
+                end_date_str=self.end_date_str
             )
             self.finished_signal.emit(memories)
         except Exception as e:
@@ -107,6 +109,21 @@ class ScrapeThread(QtCore.QThread):
                                                             
     def stop(self):
         self.is_stopped = True
+
+
+class CheckStateItem(QtWidgets.QTableWidgetItem):
+    """체크 상태 기준으로 정렬되는 셀 아이템.
+
+    '선택' 컬럼을 셀 위젯(QCheckBox) 대신 체크형 아이템으로 만들어
+    헤더 클릭 정렬 시 체크 상태가 데이터 행과 함께 이동하도록 한다.
+    """
+    def __lt__(self, other):
+        if isinstance(other, QtWidgets.QTableWidgetItem):
+            try:
+                return int(self.checkState()) < int(other.checkState())
+            except Exception:
+                pass
+        return super().__lt__(other)
 
 
 class DownloadThread(QtCore.QThread):
@@ -299,6 +316,8 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.download_thread = None
         # 증분 백업: 이전에 성공적으로 받은 항목 id 목록 (로컬 저장)
         self.downloaded_ids = self._load_manifest()
+        # 테이블 행 삽입 중 itemChanged 시그널로 인한 과도한 라벨 갱신 방지 플래그
+        self._table_populating = False
         self.init_ui()
         # 새 버전 확인 (백그라운드, 실패해도 무시)
         threading.Thread(target=self._check_update_worker, daemon=True).start()
@@ -653,9 +672,30 @@ class KidsnoteApp(QtWidgets.QWidget):
         period_layout = QtWidgets.QVBoxLayout()
         period_layout.addWidget(QtWidgets.QLabel("조회 기간:"))
         self.period_combo = QtWidgets.QComboBox()
-        self.period_combo.addItems(["전체 수집 (시간이 오래 걸릴 수 있습니다)", "최근 3개월", "최근 6개월", "최근 1년", "최근 2년"])
+        self.period_combo.addItems([
+            "전체 수집 (시간이 오래 걸릴 수 있습니다)",
+            "최근 1주", "최근 1개월", "최근 3개월", "최근 6개월", "최근 1년", "최근 2년",
+            "직접 입력",
+        ])
         self.period_combo.setCurrentIndex(0)
         period_layout.addWidget(self.period_combo)
+
+        # 날짜 범위 표시/입력 칸 — 프리셋 선택 시 자동 반영(비활성), '직접 입력' 선택 시 활성화
+        date_range_layout = QtWidgets.QHBoxLayout()
+        date_range_layout.setSpacing(FS(4))
+        self.start_date_edit = QtWidgets.QDateEdit()
+        self.start_date_edit.setDisplayFormat("yyyy.MM.dd")
+        self.start_date_edit.setCalendarPopup(True)
+        self.end_date_edit = QtWidgets.QDateEdit()
+        self.end_date_edit.setDisplayFormat("yyyy.MM.dd")
+        self.end_date_edit.setCalendarPopup(True)
+        date_range_layout.addWidget(self.start_date_edit)
+        date_range_layout.addWidget(QtWidgets.QLabel("~"))
+        date_range_layout.addWidget(self.end_date_edit)
+        period_layout.addLayout(date_range_layout)
+
+        self.period_combo.currentIndexChanged.connect(self.on_period_changed)
+        self.on_period_changed()  # 초기 상태(전체 수집) 반영
         btn_layout.addLayout(period_layout)
 
         # 추억 목록 불러오기 / 작업 중지 버튼 (세로 배치)
@@ -744,6 +784,16 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.table.setColumnWidth(4, FS(180))  # 작성자: "2025 GREEN 교사" 등
         self.table.setColumnWidth(5, FS(45))   # 사진: O/X
         self.table.setColumnWidth(6, FS(50))   # 백업: 이전에 받은 항목 O 표시
+
+        # 헤더 클릭 정렬: 화살표 표시 + 오름/내림 토글 (선택 컬럼은 체크 상태 기준)
+        table_header = self.table.horizontalHeader()
+        table_header.setSortIndicatorShown(True)
+        # 정렬 후에는 행 위치가 바뀌므로, 위치 기준인 검색 필터 숨김 상태를 재적용
+        table_header.sortIndicatorChanged.connect(
+            lambda *_: QtCore.QTimer.singleShot(0, lambda: self.filter_table(self.search_input.text()))
+        )
+        # 체크박스(0번 컬럼) 상태 변경 시 선택 개수 라벨 갱신
+        self.table.itemChanged.connect(self._on_table_item_changed)
         self.table.setSortingEnabled(True)
         table_layout.addWidget(self.table)
         
@@ -1608,7 +1658,41 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.chk_report.setEnabled(enabled)
         self.chk_album.setEnabled(enabled)
         self.period_combo.setEnabled(enabled)
+        if enabled:
+            self.on_period_changed()  # 직접 입력 모드였다면 날짜칸도 함께 복원
+        else:
+            self.start_date_edit.setEnabled(False)
+            self.end_date_edit.setEnabled(False)
         self.child_combo.setEnabled(enabled and bool(getattr(self, 'children_data', None)))
+
+    # 프리셋 텍스트 → 오늘로부터의 일수
+    _PERIOD_PRESET_DAYS = (("1주", 7), ("1개월", 30), ("3개월", 90), ("6개월", 180), ("1년", 365), ("2년", 730))
+
+    def on_period_changed(self):
+        """조회 기간 콤보 변경 시 날짜칸을 자동 반영. '직접 입력'만 날짜칸 활성화."""
+        text = self.period_combo.currentText()
+        manual = text.startswith("직접")
+        self.start_date_edit.setEnabled(manual)
+        self.end_date_edit.setEnabled(manual)
+        if manual:
+            return
+        today = QtCore.QDate.currentDate()
+        days = None
+        for keyword, preset_days in self._PERIOD_PRESET_DAYS:
+            if keyword in text:
+                days = preset_days
+                break
+        self.start_date_edit.setDate(today.addDays(-days) if days else QtCore.QDate(2015, 1, 1))
+        self.end_date_edit.setDate(today)
+
+    def _period_desc(self):
+        """결과 안내 메시지에 쓸 조회 기간 설명 문자열."""
+        text = self.period_combo.currentText()
+        if text.startswith("전체"):
+            return "전체"
+        if text.startswith("직접"):
+            return f"{self.start_date_edit.date().toString('yyyy.MM.dd')} ~ {self.end_date_edit.date().toString('yyyy.MM.dd')}"
+        return text
 
     def load_memories(self):
         if not self.driver: return
@@ -1618,6 +1702,19 @@ class KidsnoteApp(QtWidgets.QWidget):
         if not self.chk_report.isChecked() and not self.chk_album.isChecked():
             QtWidgets.QMessageBox.warning(self, "경고", "수집할 대상을 최소 하나 이상 선택하세요.")
             return
+
+        # 조회 기간 확정 (날짜칸이 단일 기준 — 프리셋도 여기 반영되어 있음)
+        period_text = self.period_combo.currentText()
+        limit_date_str = None
+        end_date_str = None
+        if not period_text.startswith("전체"):
+            start_qdate = self.start_date_edit.date()
+            end_qdate = self.end_date_edit.date()
+            if start_qdate > end_qdate:
+                QtWidgets.QMessageBox.warning(self, "기간 오류", "시작 날짜가 종료 날짜보다 늦습니다.\n조회 기간을 다시 확인해 주세요.")
+                return
+            limit_date_str = start_qdate.toString("yyyy.MM.dd")
+            end_date_str = end_qdate.toString("yyyy.MM.dd")
 
         self.status_label.setText('목록 불러오는 중...')
         self._set_shared_controls_enabled(False)
@@ -1631,23 +1728,6 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.memories = []
         self.table.setRowCount(0)
 
-        import datetime
-        today = datetime.date.today()
-        limit_date_str = None
-        period_text = self.period_combo.currentText()
-        if "3개월" in period_text:
-            limit_date = today - datetime.timedelta(days=90)
-            limit_date_str = limit_date.strftime("%Y.%m.%d")
-        elif "6개월" in period_text:
-            limit_date = today - datetime.timedelta(days=180)
-            limit_date_str = limit_date.strftime("%Y.%m.%d")
-        elif "1년" in period_text:
-            limit_date = today - datetime.timedelta(days=365)
-            limit_date_str = limit_date.strftime("%Y.%m.%d")
-        elif "2년" in period_text:
-            limit_date = today - datetime.timedelta(days=730)
-            limit_date_str = limit_date.strftime("%Y.%m.%d")
-
         child_name = None
         if hasattr(self, 'children_data') and self.children_data:
             idx = self.child_combo.currentIndex()
@@ -1655,11 +1735,12 @@ class KidsnoteApp(QtWidgets.QWidget):
                 child_name = self.children_data[idx]['text'].split()[0]
 
         self.scrape_thread = ScrapeThread(
-            driver=self.driver, 
-            scrape_reports=self.chk_report.isChecked(), 
+            driver=self.driver,
+            scrape_reports=self.chk_report.isChecked(),
             scrape_albums=self.chk_album.isChecked(),
             limit_date_str=limit_date_str,
-            child_name=child_name
+            child_name=child_name,
+            end_date_str=end_date_str
         )
         self.scrape_thread.status_signal.connect(self.update_status)
         self.scrape_thread.profile_signal.connect(self.update_profile)
@@ -1668,46 +1749,35 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.scrape_thread.finished.connect(self._ensure_load_finished)
         self.scrape_thread.start()
 
-    def select_all(self):
-        for i in range(self.table.rowCount()):
-            if not self.table.isRowHidden(i):
-                chk_widget = self.table.cellWidget(i, 0)
-                checkbox = chk_widget.findChild(QtWidgets.QCheckBox)
-                if checkbox:
-                    checkbox.blockSignals(True)
-                    checkbox.setChecked(True)
-                    checkbox.blockSignals(False)
+    def _set_all_checks(self, decide_checked):
+        """표시 중인 모든 행의 체크 상태를 일괄 변경. decide_checked(row)가 True면 체크."""
+        self.table.blockSignals(True)
+        try:
+            for i in range(self.table.rowCount()):
+                if self.table.isRowHidden(i):
+                    continue
+                chk_item = self.table.item(i, 0)
+                if chk_item:
+                    chk_item.setCheckState(QtCore.Qt.Checked if decide_checked(i) else QtCore.Qt.Unchecked)
+        finally:
+            self.table.blockSignals(False)
         self.update_selection_label()
 
+    def select_all(self):
+        self._set_all_checks(lambda i: True)
+
     def deselect_all(self):
-        for i in range(self.table.rowCount()):
-            if not self.table.isRowHidden(i):
-                chk_widget = self.table.cellWidget(i, 0)
-                checkbox = chk_widget.findChild(QtWidgets.QCheckBox)
-                if checkbox:
-                    checkbox.blockSignals(True)
-                    checkbox.setChecked(False)
-                    checkbox.blockSignals(False)
-        self.update_selection_label()
+        self._set_all_checks(lambda i: False)
 
     def select_new_only(self):
         """증분 백업: 이 PC에서 아직 받은 적 없는 항목만 체크."""
-        for i in range(self.table.rowCount()):
-            if self.table.isRowHidden(i):
-                continue
-            chk_widget = self.table.cellWidget(i, 0)
-            checkbox = chk_widget.findChild(QtWidgets.QCheckBox) if chk_widget else None
-            if not checkbox:
-                continue
+        def is_new(i):
             title_item = self.table.item(i, 2)
             idx = title_item.data(QtCore.Qt.UserRole) if title_item else None
-            is_new = True
             if idx is not None and 0 <= idx < len(self.memories):
-                is_new = self.memories[idx].get('id') not in self.downloaded_ids
-            checkbox.blockSignals(True)
-            checkbox.setChecked(is_new)
-            checkbox.blockSignals(False)
-        self.update_selection_label()
+                return self.memories[idx].get('id') not in self.downloaded_ids
+            return True
+        self._set_all_checks(is_new)
 
     def _refresh_backup_marks(self):
         """다운로드 완료 후 테이블의 '백업' 컬럼 표시 갱신."""
@@ -1743,11 +1813,15 @@ class KidsnoteApp(QtWidgets.QWidget):
         for i in range(self.table.rowCount()):
             if not self.table.isRowHidden(i):
                 total += 1
-                chk_widget = self.table.cellWidget(i, 0)
-                checkbox = chk_widget.findChild(QtWidgets.QCheckBox)
-                if checkbox and checkbox.isChecked():
+                chk_item = self.table.item(i, 0)
+                if chk_item and chk_item.checkState() == QtCore.Qt.Checked:
                     selected += 1
         self.selection_label.setText(f"선택됨: {selected} / 표시됨: {total}")
+
+    def _on_table_item_changed(self, item):
+        """0번(선택) 컬럼 체크 변경 시 선택 개수 라벨 갱신."""
+        if item is not None and item.column() == 0 and not getattr(self, '_table_populating', False):
+            self.update_selection_label()
 
     def stop_memories(self):
         self.stop_flag = True
@@ -1765,22 +1839,19 @@ class KidsnoteApp(QtWidgets.QWidget):
     @QtCore.pyqtSlot(dict)
     def add_memory_to_table(self, mem):
         self.table.setSortingEnabled(False) # 정렬 중에 행을 삽입하면 꼬일 수 있으므로 임시 비활성화
-        
+        self._table_populating = True
+
         self.memories.append(mem)
         i = self.table.rowCount()
         self.table.insertRow(i)
-        
-        # Checkbox
-        chk_widget = QtWidgets.QWidget()
-        chk_layout = QtWidgets.QHBoxLayout(chk_widget)
-        checkbox = QtWidgets.QCheckBox()
-        checkbox.setChecked(True)
-        checkbox.stateChanged.connect(lambda state: self.update_selection_label())
-        chk_layout.addWidget(checkbox)
-        chk_layout.setAlignment(QtCore.Qt.AlignCenter)
-        chk_layout.setContentsMargins(0, 0, 0, 0)
-        self.table.setCellWidget(i, 0, chk_widget)
-        
+
+        # 체크박스: 셀 위젯 대신 체크형 아이템 — 헤더 정렬 시 체크 상태가 행과 함께 이동
+        chk_item = CheckStateItem()
+        chk_item.setFlags(QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable)
+        chk_item.setCheckState(QtCore.Qt.Checked)
+        chk_item.setTextAlignment(QtCore.Qt.AlignCenter)
+        self.table.setItem(i, 0, chk_item)
+
         self.table.setItem(i, 1, QtWidgets.QTableWidgetItem(mem['date']))
         
         title_item = QtWidgets.QTableWidgetItem(mem['title'])
@@ -1793,6 +1864,7 @@ class KidsnoteApp(QtWidgets.QWidget):
         backed_mark = "O" if mem.get('id') in self.downloaded_ids else ""
         self.table.setItem(i, 6, QtWidgets.QTableWidgetItem(backed_mark))
 
+        self._table_populating = False
         self.table.setSortingEnabled(True) # 다시 활성화
         self.table.scrollToBottom()
         self.update_selection_label()
@@ -1831,14 +1903,14 @@ class KidsnoteApp(QtWidgets.QWidget):
 
             # 진단 정보로 '정상 조회했으나 0건'과 '조회 자체 실패'를 구분해 안내
             info = getattr(self.scrape_thread, 'result_info', None) or {}
-            period_text = self.period_combo.currentText().split()[0] if self.period_combo.currentText() else "선택한 기간"
+            period_text = self._period_desc()
 
             if info.get('filtered_out', 0) > 0:
-                # 목록은 정상적으로 열렸고 게시물도 있었지만, 전부 조회 기간보다 오래된 항목
+                # 목록은 정상적으로 열렸고 게시물도 있었지만, 전부 조회 기간 범위 밖
                 msg = (
                     f"목록은 정상적으로 확인했습니다.\n\n"
-                    f"다만 게시물이 모두 [{period_text}] 조회 기간보다 오래되어 결과가 0건입니다.\n"
-                    f"조회 기간을 더 길게 설정한 뒤 다시 시도해 보세요."
+                    f"다만 [{period_text}] 조회 기간 범위에 해당하는 게시물이 없어 결과가 0건입니다.\n"
+                    f"조회 기간을 조정한 뒤 다시 시도해 보세요."
                 )
                 self.update_status(f"조회 완료: [{period_text}] 기간 내 게시물 0건")
                 self._show_top_message(QtWidgets.QMessageBox.Information, "기간 내 게시물 없음", msg)
@@ -1887,16 +1959,14 @@ class KidsnoteApp(QtWidgets.QWidget):
             return
         selected_indices = []
         for i in range(self.table.rowCount()):
-            chk_widget = self.table.cellWidget(i, 0)
-            if not chk_widget:
+            chk_item = self.table.item(i, 0)
+            if not chk_item or chk_item.checkState() != QtCore.Qt.Checked:
                 continue
-            checkbox = chk_widget.findChild(QtWidgets.QCheckBox)
-            if checkbox and checkbox.isChecked():
-                index_item = self.table.item(i, 2)
-                if index_item:
-                    orig_idx = index_item.data(QtCore.Qt.UserRole)
-                    if orig_idx is not None:
-                        selected_indices.append(orig_idx)
+            index_item = self.table.item(i, 2)
+            if index_item:
+                orig_idx = index_item.data(QtCore.Qt.UserRole)
+                if orig_idx is not None:
+                    selected_indices.append(orig_idx)
         
         if not selected_indices:
             QtWidgets.QMessageBox.warning(self, "경고", "다운로드할 항목을 선택해주세요.")

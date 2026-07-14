@@ -374,10 +374,12 @@ def save_debug_snapshot(driver, step_name, log_func=print, mem=None):
         log_func(f"[DEBUG LOG] 스냅샷 저장 실패: {e}")
 
 
-def _scrape_list_pages(driver, item_type, memories, log, item_found_callback=None, check_stop_callback=None, limit_date_str=None, child_name=None, result_info=None):
+def _scrape_list_pages(driver, item_type, memories, log, item_found_callback=None, check_stop_callback=None, limit_date_str=None, child_name=None, result_info=None, end_date_str=None):
     """
     Helper to scrape all pages of a list (Report or Album).
     Yields or callbacks items as they are found.
+    limit_date_str(시작일)보다 오래된 게시물에서 탐색을 중단하고,
+    end_date_str(종료일)보다 최신인 게시물은 건너뛴다 (목록은 최신순).
     result_info(dict)에 조회 결과 진단 정보를 기록해 GUI가
     '기간 내 항목 없음'과 '네트워크 실패'를 구분해 안내할 수 있게 한다.
     """
@@ -496,6 +498,12 @@ def _scrape_list_pages(driver, item_type, memories, log, item_found_callback=Non
                     url = link_elem.get_attribute("href")
                 except:
                     pass
+
+                if end_date_str and date and date != "날짜 알 수 없음" and date > end_date_str:
+                    # 종료일보다 최신 게시물은 건너뛰고 계속 탐색 (더 과거로 내려가면 범위에 들어옴)
+                    filtered_items_count += 1
+                    info['filtered_out'] = info.get('filtered_out', 0) + 1
+                    continue
 
                 if limit_date_str and date and date != "날짜 알 수 없음":
                     if date < limit_date_str:
@@ -678,10 +686,11 @@ def navigate_to_memory_view(driver, item_type_label, log_func, target_child=None
         
 
 
-def fetch_memory_list(driver, status_callback=None, item_found_callback=None, check_stop_callback=None, scrape_reports=True, scrape_albums=True, profile_found_callback=None, limit_date_str=None, child_name=None, result_info=None):
+def fetch_memory_list(driver, status_callback=None, item_found_callback=None, check_stop_callback=None, scrape_reports=True, scrape_albums=True, profile_found_callback=None, limit_date_str=None, child_name=None, result_info=None, end_date_str=None):
     """
     Fetches the list of memories by navigating directly to /service/report and /service/album.
     If child_name is provided, navigate to /service first and click the child with that name.
+    limit_date_str~end_date_str (yyyy.mm.dd) 범위의 게시물만 수집한다.
     result_info(dict)를 넘기면 조회 결과 진단 정보(list_loaded/items_seen/filtered_out/timeout/nav_failed)를 기록한다.
     """
     def log(msg):
@@ -825,7 +834,7 @@ def fetch_memory_list(driver, status_callback=None, item_found_callback=None, ch
             if navigate_to_memory_view(driver, label, log, target_child=None):
                 nav_ok = True
                 log(f"{label} 전수 조사를 시작합니다...")
-                _scrape_list_pages(driver, label, memories, log, item_found_callback, check_stop_callback, limit_date_str, child_name, result_info=attempt_info)
+                _scrape_list_pages(driver, label, memories, log, item_found_callback, check_stop_callback, limit_date_str, child_name, result_info=attempt_info, end_date_str=end_date_str)
             collected = len(memories) - before
 
             abnormal_empty = collected == 0 and (not nav_ok or attempt_info.get('timeout'))
