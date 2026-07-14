@@ -10,16 +10,18 @@ if not exist "%DRIVER_PATH%" set "DRIVER_PATH=%PROJECT_ROOT%\msedgedriver.exe"
 set "APP_NAME=Kidsnote_Memories_Saver_V1.00"
 set "RELEASE_DIR=Kidsnote_Release_V1.00"
 
-REM 빌드 모드: 기본 onefile(단일 exe). "build_release_v1.bat onedir"로 실행하면
-REM 폴더 배포 빌드가 되어 PyInstaller 임시폴더(MEIxxxx) 추출/삭제 과정이 아예 없음.
-REM 사내 PC처럼 보안 프로그램이 임시폴더를 잠가 종료 시 경고가 뜨는 환경에 권장.
+REM 빌드 모드: 기본 onedir(폴더 배포).
+REM  - onedir: 실행 시 임시폴더(MEIxxxx) 추출이 없어 시작이 빠르고,
+REM    사내 PC에서 종료 시 "임시폴더 삭제 실패" 경고가 원천적으로 없음. (기본)
+REM  - "build_release_v1.bat onefile"로 실행하면 기존 단일 exe 빌드.
 set "BUILD_MODE=%~1"
-if "%BUILD_MODE%"=="" set "BUILD_MODE=onefile"
-if /I "%BUILD_MODE%"=="onedir" (
-    set "MODE_FLAG=--onedir"
-    set "RELEASE_DIR=Kidsnote_Release_V1.00_onedir"
-) else (
+if "%BUILD_MODE%"=="" set "BUILD_MODE=onedir"
+if /I "%BUILD_MODE%"=="onefile" (
     set "MODE_FLAG=--onefile"
+    set "RELEASE_DIR=Kidsnote_Release_V1.00_onefile"
+) else (
+    set "BUILD_MODE=onedir"
+    set "MODE_FLAG=--onedir"
 )
 
 echo ===================================================
@@ -48,7 +50,9 @@ echo Done.
 echo.
 
 echo 2. Building %BUILD_MODE% exe with PyInstaller...
-"%BUILD_PY%" -m PyInstaller --noconfirm %MODE_FLAG% --windowed --hidden-import selenium --hidden-import requests --collect-all selenium --collect-all PIL --add-binary "%DRIVER_PATH%;." --add-data "%SCRIPT_DIR%kidsnote_engine.py;." --add-data "%SCRIPT_DIR%kidsnote_icon.ico;." --name "%APP_NAME%" --icon "%SCRIPT_DIR%kidsnote_icon.ico" "%SCRIPT_DIR%kidsnote_saver.py"
+REM kidsnote_engine.py는 import로 자동 포함(바이트코드)되므로 --add-data로
+REM 평문 소스를 동봉하지 않는다 (배포물에 .py 원문이 노출되는 것 방지)
+"%BUILD_PY%" -m PyInstaller --noconfirm %MODE_FLAG% --windowed --hidden-import selenium --hidden-import requests --collect-all selenium --collect-all PIL --add-binary "%DRIVER_PATH%;." --add-data "%SCRIPT_DIR%kidsnote_icon.ico;." --name "%APP_NAME%" --icon "%SCRIPT_DIR%kidsnote_icon.ico" "%SCRIPT_DIR%kidsnote_saver.py"
 if errorlevel 1 (
     echo ERROR: PyInstaller build failed.
     exit /b 1
@@ -58,10 +62,10 @@ echo.
 
 echo 3. Creating release folder...
 mkdir "%RELEASE_DIR%"
-if /I "%BUILD_MODE%"=="onedir" (
-    xcopy /E /I /Y "dist\%APP_NAME%" "%RELEASE_DIR%\%APP_NAME%" >nul
-) else (
+if /I "%BUILD_MODE%"=="onefile" (
     copy /Y "dist\%APP_NAME%.exe" "%RELEASE_DIR%\"
+) else (
+    xcopy /E /I /Y "dist\%APP_NAME%" "%RELEASE_DIR%\%APP_NAME%" >nul
 )
 if errorlevel 1 (
     echo ERROR: Failed to copy build output into release folder.
