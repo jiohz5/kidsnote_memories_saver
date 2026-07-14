@@ -94,11 +94,37 @@ def unprotect_secret(stored):
         return ""
 
 
-# 게시물 카드에서 '작성자 줄'을 식별하기 위한 호칭 키워드
+# 게시물 카드에서 '작성자 줄'을 식별하기 위한 호칭 키워드 (구조 추출 실패 시 폴백)
 _WRITER_KEYWORDS = (
     '교사', '선생님', '원장', '엄마', '아빠', '어머니', '아버지', '어머님', '아버님',
     '할머니', '할아버지', '외할머니', '외할아버지', '이모', '고모', '삼촌', '보호자',
 )
+
+# 카드 안의 '작은 아바타(프로필 사진)' 주변 헤더 블록에서 작성자명을 구조적으로 추출.
+# 키워드 방식과 달리 '최유찬 엄마', 교사 실명 등 표기 형태와 무관하게 잡아낸다.
+# 날짜 줄("7월 14일 화요일", "2026.07.14")은 제외한다.
+_WRITER_EXTRACT_JS = """
+var card = arguments[0];
+var datePat = /(\\d{1,2}\\s*\\uC6D4\\s*\\d{1,2}\\s*\\uC77C)|(\\d{4}\\s*[.\\-\\uB144]\\s*\\d{1,2})|\\uC694\\uC77C/;
+function lines(el){ return (el.innerText || '').split('\\n').map(function(s){ return s.trim(); }).filter(Boolean); }
+var avatars = card.querySelectorAll("img, span[role='img']");
+for (var i = 0; i < avatars.length; i++) {
+  var av = avatars[i];
+  var w = av.offsetWidth || 0;
+  if (w <= 0 || w > 80) continue;  /* 본문 사진(큰 이미지) 제외, 작은 아바타만 */
+  var node = av;
+  for (var up = 0; up < 4; up++) {
+    node = node.parentElement;
+    if (!node || node === card.parentElement) break;
+    var ls = lines(node);
+    if (ls.length > 4) break;  /* 본문까지 포함된 큰 컨테이너로 번지면 중단 */
+    for (var j = 0; j < ls.length; j++) {
+      if (ls[j].length >= 2 && ls[j].length <= 25 && !datePat.test(ls[j])) return ls[j];
+    }
+  }
+}
+return '';
+"""
 
 
 def _is_on_service_home(driver):
@@ -435,21 +461,29 @@ def _scrape_list_pages(driver, item_type, memories, log, item_found_callback=Non
                 log("알림장/앨범 수집이 사용자에 의해 중지되었습니다.")
                 return
             try:
-                # 작성자 추출: 카드 텍스트에서 호칭(교사/엄마/아빠 등)이 포함된 짧은 줄을 찾는다.
-                # 알림장은 부모(보호자)가 쓴 글도 있으므로 '선생님' 고정 표기 대신 실제 표시된 작성자를 사용.
-                # 본문 문장 오인을 줄이기 위해 25자 이하의 줄만 후보로 본다 (작성자 줄은 "김OO 엄마"처럼 짧음).
-                writer = "알 수 없음"
+                # 작성자 추출 1순위: 아바타 인접 구조 기반 (호칭 표기와 무관하게 동작)
+                writer = ""
                 try:
-                    card_text = post.text or ""
-                    for line in card_text.split('\n'):
-                        line = line.strip()
-                        if not line or len(line) > 25:
-                            continue
-                        if any(k in line for k in _WRITER_KEYWORDS):
-                            writer = line
-                            break
+                    writer = (driver.execute_script(_WRITER_EXTRACT_JS, post) or "").strip()
                 except Exception:
-                    pass
+                    writer = ""
+
+                # 2순위 폴백: 호칭 키워드(교사/엄마/아빠 등)가 포함된 짧은 줄
+                if not writer:
+                    try:
+                        card_text = post.text or ""
+                        for line in card_text.split('\n'):
+                            line = line.strip()
+                            if not line or len(line) > 25:
+                                continue
+                            if any(k in line for k in _WRITER_KEYWORDS):
+                                writer = line
+                                break
+                    except Exception:
+                        pass
+
+                if not writer:
+                    writer = "알 수 없음"
 
                 # 사진 유무 판별 (img 태그가 하나라도 있으면 O)
                 has_photo = "O" if len(post.find_elements(By.TAG_NAME, "img")) > 0 else "X"
@@ -615,17 +649,27 @@ def navigate_to_memory_view(driver, item_type_label, log_func, target_child=None
             except Exception as e:
                 log_func(f"아이 전환 중 예외 (무시): {e}")
 
-        # 추억보기 1순위 클릭
+        # 이미 추억보기 화면(전체보기 버튼 노출)이라면 메뉴 클릭 단계를 통째로 생략.
+        # SPA는 URL이 /service 그대로인 채 화면만 바뀌므로 URL 판단만으로는 부족하다.
         clicked = False
         try:
-            mem_btn = WebDriverWait(driver, 20).until(
-                EC.element_to_be_clickable((By.XPATH, "//*[contains(@class,'e1q0zrbj0') and contains(.,'추억보기')]"))
-            )
-            driver.execute_script("arguments[0].click();", mem_btn)
-            time.sleep(0.5)
-            clicked = True
-        except:
+            if any(b.is_displayed() for b in driver.find_elements(By.XPATH, "//*[contains(text(),'전체보기')]")):
+                log_func("이미 추억보기 화면입니다. 메뉴 클릭을 생략합니다.")
+                clicked = True
+        except Exception:
             pass
+
+        # 추억보기 1순위 클릭
+        if not clicked:
+            try:
+                mem_btn = WebDriverWait(driver, 20).until(
+                    EC.element_to_be_clickable((By.XPATH, "//*[contains(@class,'e1q0zrbj0') and contains(.,'추억보기')]"))
+                )
+                driver.execute_script("arguments[0].click();", mem_btn)
+                time.sleep(0.5)
+                clicked = True
+            except:
+                pass
             
         # 추억보기 2순위 드롭다운 클릭
         if not clicked:
@@ -737,29 +781,13 @@ def fetch_memory_list(driver, status_callback=None, item_found_callback=None, ch
         except Exception as e:
             log(f"아이 전환 중 오류 (무시됨): {e}")
 
-    # ── 추억보기 진입 시도 및 사이드바 구조 디버그 저장 ──
-    try:
-        # 추억보기 버튼 탐색 (data-testid 또는 텍스트)
-        mem_btn = None
+    # 주의: 예전에는 여기서 추억보기 메뉴를 미리 한 번 클릭했으나 제거했다.
+    # SPA는 URL이 /service 그대로인 채 화면만 바뀌므로, 미리 클릭해 두면
+    # navigate_to_memory_view가 '홈'으로 오판해 사라진 메뉴 버튼을 20초+15초씩
+    # 기다리는 지연('알림장 추억 목록 조회 중' 멈춤 증상)의 원인이 됐다.
+    # 프로필 추출(아래)은 홈 화면의 활성 아바타로 충분하다.
+    if _debug_enabled():
         try:
-            mem_btn = driver.find_element(By.XPATH,
-                "//*[@data-testid='center-sidebar-menu-select']"
-            )
-        except Exception:
-            pass
-        if not mem_btn:
-            candidates = driver.find_elements(By.XPATH, "//*[contains(text(),'추억보기')]")
-            if candidates:
-                mem_btn = candidates[0]
-
-        if mem_btn:
-            driver.execute_script("arguments[0].click();", mem_btn)
-            time.sleep(0.5)
-
-        log(f"DEBUG: 추억보기 클릭 후 URL: {driver.current_url}")
-
-        # 사이드바 HTML 저장 (디버그 모드 전용 — 개인정보 포함 가능)
-        if _debug_enabled():
             sidebar_html = driver.execute_script(
                 "var s = document.querySelector('nav') || document.querySelector('[class*=\"sidebar\"]') || document.querySelector('aside');"
                 "return s ? s.outerHTML : document.body.innerHTML.substring(0, 30000);"
@@ -768,8 +796,8 @@ def fetch_memory_list(driver, status_callback=None, item_found_callback=None, ch
             with open(debug_path, "w", encoding="utf-8") as f:
                 f.write(f"<!-- URL: {driver.current_url} -->\n" + (sidebar_html or ""))
             log(f"DEBUG: 사이드바 HTML → {debug_path}")
-    except Exception as _se:
-        log(f"DEBUG: 사이드바 저장 실패: {_se}")
+        except Exception as _se:
+            log(f"DEBUG: 사이드바 저장 실패: {_se}")
 
 
     # 1.5 Extract Profile
