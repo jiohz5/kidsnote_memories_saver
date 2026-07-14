@@ -1371,15 +1371,24 @@ class KidsnoteApp(QtWidgets.QWidget):
                             url = url.replace('img_36x36.jpg', 'img_240x240.jpg')
                             url = url.replace('img_65x65.jpg', 'img_240x240.jpg')
                             url = url.replace('img_130x130.jpg', 'img_240x240.jpg')
-                    
-                    child_array.append([name, age, url, orig_url])
+
+                    # 사내망 등에서 requests 직접 다운로드가 차단돼도 얼굴이 뜨도록,
+                    # 지금 활성화된 아바타 요소를 브라우저에서 직접 캡처해 둔다 (네트워크 불필요)
+                    shot_b64 = ""
+                    try:
+                        avatar_elem = self.driver.find_element(By.CSS_SELECTOR, "span[role='img'][size='65']")
+                        shot_b64 = avatar_elem.screenshot_as_base64
+                    except Exception:
+                        pass
+
+                    child_array.append([name, age, url, orig_url, shot_b64])
                 
                 
                 
                 seen_names = set()
                 img_fetch_fail_streak = 0  # 사내망 CDN 차단 시 자녀마다 수십 초씩 지연되는 것을 방지
                 for idx, item in enumerate(child_array):
-                    name, age, url, orig_url = item
+                    name, age, url, orig_url, shot_b64 = item
                     if not name or not age:
                         continue
 
@@ -1430,7 +1439,11 @@ class KidsnoteApp(QtWidgets.QWidget):
                                 img_fetch_fail_streak = 0
                             else:
                                 img_fetch_fail_streak += 1
-                        
+
+                        # 원본 다운로드 실패(사내망 차단 등) 시 브라우저 캡처본으로 대체
+                        if not img_b64 and shot_b64:
+                            img_b64 = shot_b64
+
                         click_elem = click_elems[idx] if idx < len(click_elems) else None
                         self.children_data.append({
                             "text": text_val, 

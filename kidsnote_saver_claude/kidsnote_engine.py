@@ -796,6 +796,15 @@ def fetch_memory_list(driver, status_callback=None, item_found_callback=None, ch
                 except Exception as e:
                     log(f"프로필 사진 획득 실패 (무시됨) - {e}")
 
+            # 사내망 등에서 직접 다운로드가 차단된 경우, 화면에 이미 렌더링된
+            # 아바타 요소를 브라우저에서 캡처해 대체 (네트워크 불필요)
+            if not img_b64:
+                try:
+                    avatar_elem = driver.find_element(By.CSS_SELECTOR, "span[role='img'][size='65']")
+                    img_b64 = avatar_elem.screenshot_as_base64
+                except Exception:
+                    pass
+
             if profile_found_callback:
                 profile_found_callback({"text": profile_text, "image": img_b64})
         else:
