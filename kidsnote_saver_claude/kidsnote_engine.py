@@ -233,6 +233,65 @@ def probe_direct_access(driver, timeout=5):
         return False
 
 
+def _browser_fetch_media(driver, url, timeout=60):
+    """브라우저(페이지 컨텍스트) 안에서 fetch로 미디어를 받아 bytes로 반환.
+
+    파이썬 requests 직접 접근이 프록시/보안 정책으로 차단된 환경에서도
+    브라우저 자체 네트워크는 뚫려 있으므로(페이지에 사진이 잘 보임),
+    로그인 세션 그대로 fetch → blob → base64로 꺼내온다.
+    반환: (bytes 또는 None, 상태 문자열)
+    """
+    js = """
+        var url = arguments[0];
+        var done = arguments[arguments.length - 1];
+        try {
+            var ctrl = new AbortController();
+            setTimeout(function(){ ctrl.abort(); }, %d);
+            fetch(url, {credentials: 'include', signal: ctrl.signal}).then(function(r){
+                if (!r.ok) { done('ERR:HTTP_' + r.status); return null; }
+                return r.blob();
+            }).then(function(b){
+                if (!b) { return; }
+                var fr = new FileReader();
+                fr.onload = function(){
+                    window.__kn_media_b64 = String(fr.result).split(',')[1] || '';
+                    done('OK:' + window.__kn_media_b64.length);
+                };
+                fr.onerror = function(){ done('ERR:READ'); };
+                fr.readAsDataURL(b);
+            }).catch(function(e){ done('ERR:' + (e && e.name ? e.name : 'FETCH')); });
+        } catch (e) {
+            done('ERR:' + e);
+        }
+    """ % max(int((timeout - 5) * 1000), 5000)
+    try:
+        driver.set_script_timeout(timeout)
+        result = driver.execute_async_script(js, url)
+        if not (isinstance(result, str) and result.startswith('OK:')):
+            return None, str(result or 'ERR:UNKNOWN')
+        total_len = int(result[3:])
+        if total_len <= 0:
+            return None, 'ERR:EMPTY'
+        # 대용량 base64를 한 번에 반환하면 드라이버가 불안정해질 수 있어 4MB씩 분할 수신
+        chunks = []
+        chunk_size = 4 * 1024 * 1024
+        for offset in range(0, total_len, chunk_size):
+            part = driver.execute_script(
+                "return (window.__kn_media_b64 || '').substring(arguments[0], arguments[1]);",
+                offset, offset + chunk_size)
+            chunks.append(part or '')
+        driver.execute_script("window.__kn_media_b64 = null;")
+        data = base64.b64decode(''.join(chunks))
+        return (data, 'OK') if data else (None, 'ERR:DECODE')
+    except Exception as e:
+        return None, f'ERR:{type(e).__name__}'
+    finally:
+        try:
+            driver.set_script_timeout(30)
+        except Exception:
+            pass
+
+
 def fetch_bytes_with_browser_session(driver, url, session=None, referer=None, timeout=60):
     url = normalize_media_url(driver, url)
     if not url:
@@ -431,7 +490,22 @@ def _scrape_list_pages(driver, item_type, memories, log, item_found_callback=Non
             break
 
         info['list_loaded'] = True
-        post_items = driver.find_elements(By.XPATH, "//div[contains(@class, 'exa4ze60') or contains(@class, 'css-220836')]")
+
+        # 스켈레톤/부분 렌더링 대응: 카드 개수가 안정될 때까지 짧게 폴링.
+        # (첫 카드 하나만 뜬 순간 수집을 시작해 '1개 수집 완료(빈 행)'로 끝나는 증상 방지)
+        post_items = []
+        try:
+            prev_count = -1
+            stable_deadline = time.time() + 6
+            while time.time() < stable_deadline:
+                post_items = driver.find_elements(By.XPATH, "//div[contains(@class, 'exa4ze60') or contains(@class, 'css-220836')]")
+                if len(post_items) == prev_count and prev_count > 0:
+                    break
+                prev_count = len(post_items)
+                time.sleep(0.4)
+        except Exception:
+            post_items = driver.find_elements(By.XPATH, "//div[contains(@class, 'exa4ze60') or contains(@class, 'css-220836')]")
+
         total_items = len(post_items)
         info['items_seen'] = info.get('items_seen', 0) + total_items
         log(f"DEBUG: 게시물 항목을 {total_items}개 찾음.")
@@ -547,6 +621,11 @@ def _scrape_list_pages(driver, item_type, memories, log, item_found_callback=Non
                         info['filtered_out'] = info.get('filtered_out', 0) + 1
                         return
                 
+                # 날짜도 제목도 없는 빈(스켈레톤) 카드는 수집하지 않는다
+                if (not date or date == "날짜 알 수 없음") and (not title or title == "제목 알 수 없음"):
+                    log(f"DEBUG: 항목 {idx}: 빈(스켈레톤) 카드로 판단되어 제외")
+                    continue
+
                 item_id = f"{item_type}_{date}_{title}_{url}"
                 if not any(m.get('id') == item_id for m in memories):
                     new_mem = {
@@ -865,7 +944,12 @@ def fetch_memory_list(driver, status_callback=None, item_found_callback=None, ch
                 _scrape_list_pages(driver, label, memories, log, item_found_callback, check_stop_callback, limit_date_str, child_name, result_info=attempt_info, end_date_str=end_date_str)
             collected = len(memories) - before
 
-            abnormal_empty = collected == 0 and (not nav_ok or attempt_info.get('timeout'))
+            # 비정상 0건 판단: 진입 실패 / 타임아웃 / 카드가 보였는데 전부 파싱 불가(스켈레톤)
+            parse_failed = (
+                attempt_info.get('items_seen', 0) > 0
+                and attempt_info.get('filtered_out', 0) == 0
+            )
+            abnormal_empty = collected == 0 and (not nav_ok or attempt_info.get('timeout') or parse_failed)
             stopped = bool(check_stop_callback and check_stop_callback())
             if attempt == 1 and abnormal_empty and not stopped:
                 log(f"{label} 조회가 비정상 종료되어 화면을 새로 고친 뒤 한 번 더 시도합니다...")
@@ -1044,10 +1128,12 @@ def download_as_pdf(driver, post_info, target_path, status_callback=None, check_
         log(f"PDF 저장 오류: {e}")
         return False
 
-def download_photos_only(driver, post_info, target_dir, status_callback=None, check_stop_callback=None, include_video=True):
+def download_photos_only(driver, post_info, target_dir, status_callback=None, check_stop_callback=None, include_video=True, prefer_browser_fetch=False):
     """
     Downloads only images from the currently open post detail page.
     include_video=False면 동영상(video/source 태그, 동영상 확장자)은 건너뛴다.
+    prefer_browser_fetch=True면 (사전 점검에서 직접 접근 차단이 확인된 경우)
+    requests 시도를 생략하고 곧바로 브라우저 경유 다운로드를 사용한다.
     """
     def log(msg):
         if status_callback and 'DEBUG' not in msg:
@@ -1158,50 +1244,84 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
 
         count = 0
         failed_count = 0
+        browser_fallback_used = False
         prefix_str = _media_prefix(post_info)
         for idx, src in enumerate(media_srcs):
             if _stop_requested(check_stop_callback):
                 log("다운로드가 중지되었습니다.")
                 return False
-            try:
-                log(f"미디어 다운로드 중 ({idx+1}/{len(media_srcs)})...")
-                headers = {"Referer": driver.current_url or "https://www.kidsnote.com/"}
-                response = _session_get(session, src, headers=headers, timeout=(10, 30), stream=True, allow_redirects=True)
-                response.raise_for_status()
-                content_type = response.headers.get("content-type", "")
-                if "text/html" in content_type.lower():
-                    raise ValueError("media request returned an HTML page")
-                ext = _extension_from_response(src, content_type)
+            log(f"미디어 다운로드 중 ({idx+1}/{len(media_srcs)})...")
+            saved = False
+            fail_status = ""
 
-                file_path = os.path.join(target_dir, f"{prefix_str}_{count+1}.{ext}")
-                tmp_path = file_path + ".part"
-                wrote_any = False
-                with open(tmp_path, "wb") as f:
-                    for chunk in response.iter_content(chunk_size=1024 * 256):
-                        if _stop_requested(check_stop_callback):
-                            raise InterruptedError("download stopped")
-                        if chunk:
-                            wrote_any = True
-                            f.write(chunk)
-                if not wrote_any:
-                    raise ValueError("empty media response")
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-                os.replace(tmp_path, file_path)
-                _apply_post_timestamp(file_path, post_info)
-                count += 1
-            except Exception as req_e:
+            # 1차: 파이썬 직접 다운로드 (차단 확인된 환경이면 시도 자체를 생략해 시간 절약)
+            if not prefer_browser_fetch:
                 try:
-                    if 'tmp_path' in locals() and os.path.exists(tmp_path):
-                        os.remove(tmp_path)
-                except Exception:
-                    pass
+                    headers = {"Referer": driver.current_url or "https://www.kidsnote.com/"}
+                    response = _session_get(session, src, headers=headers, timeout=(10, 30), stream=True, allow_redirects=True)
+                    response.raise_for_status()
+                    content_type = response.headers.get("content-type", "")
+                    if "text/html" in content_type.lower():
+                        raise ValueError("media request returned an HTML page")
+                    ext = _extension_from_response(src, content_type)
+
+                    file_path = os.path.join(target_dir, f"{prefix_str}_{count+1}.{ext}")
+                    tmp_path = file_path + ".part"
+                    wrote_any = False
+                    with open(tmp_path, "wb") as f:
+                        for chunk in response.iter_content(chunk_size=1024 * 256):
+                            if _stop_requested(check_stop_callback):
+                                raise InterruptedError("download stopped")
+                            if chunk:
+                                wrote_any = True
+                                f.write(chunk)
+                    if not wrote_any:
+                        raise ValueError("empty media response")
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                    os.replace(tmp_path, file_path)
+                    _apply_post_timestamp(file_path, post_info)
+                    count += 1
+                    saved = True
+                except Exception as req_e:
+                    fail_status = f"direct:{type(req_e).__name__}"
+                    try:
+                        if 'tmp_path' in locals() and os.path.exists(tmp_path):
+                            os.remove(tmp_path)
+                    except Exception:
+                        pass
+                    if _stop_requested(check_stop_callback):
+                        log("다운로드가 중지되었습니다.")
+                        return False
+
+            # 2차: 브라우저 경유 다운로드 — 프록시 차단 환경에서도 브라우저 네트워크는 살아 있음
+            if not saved:
+                media_bytes, status = _browser_fetch_media(driver, src)
                 if _stop_requested(check_stop_callback):
                     log("다운로드가 중지되었습니다.")
                     return False
+                if media_bytes:
+                    try:
+                        ext = _extension_from_response(src, "")
+                        file_path = os.path.join(target_dir, f"{prefix_str}_{count+1}.{ext}")
+                        with open(file_path, "wb") as f:
+                            f.write(media_bytes)
+                        _apply_post_timestamp(file_path, post_info)
+                        count += 1
+                        saved = True
+                        browser_fallback_used = True
+                    except Exception as write_e:
+                        fail_status += f" browser:write_{type(write_e).__name__}"
+                else:
+                    fail_status += f" browser:{status}"
+
+            if not saved:
                 failed_count += 1
-                continue
-                
+                log(f"DEBUG: 미디어 다운로드 실패 ({fail_status.strip()})")
+
+        if browser_fallback_used:
+            log("직접 접근이 차단되어 일부/전체 파일을 브라우저 경유 방식으로 받았습니다.")
+
         log(f"{post_info['title']}: {count}개의 파일(사진/동영상) 다운로드 완료.")
         if count == 0:
             # 실제로 아무것도 저장하지 못했으면 성공으로 위장하지 않는다.
@@ -1220,7 +1340,7 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
         log(f"사진/동영상 다운로드 오류: {e}")
         return False
 
-def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None, is_overwrite_allow=True, check_stop_callback=None, include_video=True):
+def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None, is_overwrite_allow=True, check_stop_callback=None, include_video=True, prefer_browser_fetch=False):
     """
     Handles robust navigation to the detail page and downloads it.
     """
@@ -1263,7 +1383,7 @@ def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None,
         if is_pdf:
             return download_as_pdf(driver, mem, target_path_or_dir, status_callback, check_stop_callback)
         else:
-            return download_photos_only(driver, mem, target_path_or_dir, status_callback, check_stop_callback, include_video)
+            return download_photos_only(driver, mem, target_path_or_dir, status_callback, check_stop_callback, include_video, prefer_browser_fetch)
             
     # Need to navigate
     try:
@@ -1404,7 +1524,7 @@ def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None,
             if is_pdf:
                 res = download_as_pdf(driver, mem, target_path_or_dir, status_callback, check_stop_callback)
             else:
-                res = download_photos_only(driver, mem, target_path_or_dir, status_callback, check_stop_callback, include_video)
+                res = download_photos_only(driver, mem, target_path_or_dir, status_callback, check_stop_callback, include_video, prefer_browser_fetch)
             
             # 다운로드 완료 후 뒤로가기를 호출하여 리스트 상태로 복귀!! (이것이 속도의 핵심)
             driver.back()

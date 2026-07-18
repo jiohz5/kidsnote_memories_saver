@@ -11,7 +11,7 @@ from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 import kidsnote_engine as manager
 
-APP_VERSION = "1.02"
+APP_VERSION = "1.03"
 UPDATE_CHECK_REPO = "jiohz5/kidsnote_memories_saver"
 
 _fault_log_file = None
@@ -61,7 +61,7 @@ if hasattr(sys.stderr, 'reconfigure'):
 # Windows에서 파이썬 스크립트 실행 시 작업표시줄 아이콘이 표시되도록 설정 (AppUserModelID 강제 지정)
 try:
     import ctypes
-    myappid = 'kidsnote.memoriessaver.v1.02'
+    myappid = 'kidsnote.memoriessaver.v1.03'
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 except Exception:
     pass
@@ -179,8 +179,8 @@ class DownloadThread(QtCore.QThread):
                 self.status_signal.emit("네트워크 직접 접근 사전 점검 중...")
                 if not manager.probe_direct_access(self.driver):
                     self.network_blocked = True
-                    write_app_log("Direct network access probe failed (corporate proxy/PAC likely)")
-                    self.status_signal.emit("⚠ 사진 서버 직접 접근이 차단된 환경으로 보입니다. 다운로드가 실패할 수 있습니다.")
+                    write_app_log("Direct network access probe failed -> switching to browser-fetch mode")
+                    self.status_signal.emit("직접 접근이 차단된 환경 감지 → 브라우저 경유 다운로드로 자동 전환합니다.")
 
             date_type_counts = {}
             total = len(self.indices)
@@ -259,6 +259,7 @@ class DownloadThread(QtCore.QThread):
                             self.is_overwrite_allow,
                             self.check_stopped,
                             self.include_video,
+                            self.network_blocked,
                         )
                     else:
                         post_dir = base_target_dir if self.is_single_folder else os.path.join(base_target_dir, clean_date)
@@ -272,6 +273,7 @@ class DownloadThread(QtCore.QThread):
                             self.is_overwrite_allow,
                             self.check_stopped,
                             self.include_video,
+                            self.network_blocked,
                         )
 
                     if success:
@@ -380,7 +382,7 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.ui_call_signal.emit(callback)
 
     def init_ui(self):
-        self.setWindowTitle('Kidsnote Memories Saver V1.02')
+        self.setWindowTitle('Kidsnote Memories Saver V1.03')
         
         # 사용자의 화면 해상도를 인식하여 기본 스케일 값 도출 (FHD, QHD 등 대응)
         screen = QtWidgets.QApplication.primaryScreen()
@@ -668,34 +670,23 @@ class KidsnoteApp(QtWidgets.QWidget):
         chk_layout.addWidget(self.chk_album)
         btn_layout.addLayout(chk_layout)
 
-        # 조회 기간
+        # 조회 기간 — 날짜 범위 직접 지정 (기본값: 전체 기간에 해당하는 넓은 범위)
         period_layout = QtWidgets.QVBoxLayout()
-        period_layout.addWidget(QtWidgets.QLabel("조회 기간:"))
-        self.period_combo = QtWidgets.QComboBox()
-        self.period_combo.addItems([
-            "전체 수집 (시간이 오래 걸릴 수 있습니다)",
-            "최근 1주", "최근 1개월", "최근 3개월", "최근 6개월", "최근 1년", "최근 2년",
-            "직접 입력",
-        ])
-        self.period_combo.setCurrentIndex(0)
-        period_layout.addWidget(self.period_combo)
-
-        # 날짜 범위 표시/입력 칸 — 프리셋 선택 시 자동 반영(비활성), '직접 입력' 선택 시 활성화
+        period_layout.addWidget(QtWidgets.QLabel("조회 기간 (달력 클릭으로 변경):"))
         date_range_layout = QtWidgets.QHBoxLayout()
         date_range_layout.setSpacing(FS(4))
         self.start_date_edit = QtWidgets.QDateEdit()
         self.start_date_edit.setDisplayFormat("yyyy.MM.dd")
         self.start_date_edit.setCalendarPopup(True)
+        self.start_date_edit.setDate(QtCore.QDate(2000, 1, 1))  # 사실상 '전체'
         self.end_date_edit = QtWidgets.QDateEdit()
         self.end_date_edit.setDisplayFormat("yyyy.MM.dd")
         self.end_date_edit.setCalendarPopup(True)
+        self.end_date_edit.setDate(QtCore.QDate.currentDate())
         date_range_layout.addWidget(self.start_date_edit)
         date_range_layout.addWidget(QtWidgets.QLabel("~"))
         date_range_layout.addWidget(self.end_date_edit)
         period_layout.addLayout(date_range_layout)
-
-        self.period_combo.currentIndexChanged.connect(self.on_period_changed)
-        self.on_period_changed()  # 초기 상태(전체 수집) 반영
         btn_layout.addLayout(period_layout)
 
         # 추억 목록 불러오기 / 작업 중지 버튼 (세로 배치)
@@ -1657,42 +1648,13 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.load_btn.setEnabled(enabled)
         self.chk_report.setEnabled(enabled)
         self.chk_album.setEnabled(enabled)
-        self.period_combo.setEnabled(enabled)
-        if enabled:
-            self.on_period_changed()  # 직접 입력 모드였다면 날짜칸도 함께 복원
-        else:
-            self.start_date_edit.setEnabled(False)
-            self.end_date_edit.setEnabled(False)
+        self.start_date_edit.setEnabled(enabled)
+        self.end_date_edit.setEnabled(enabled)
         self.child_combo.setEnabled(enabled and bool(getattr(self, 'children_data', None)))
-
-    # 프리셋 텍스트 → 오늘로부터의 일수
-    _PERIOD_PRESET_DAYS = (("1주", 7), ("1개월", 30), ("3개월", 90), ("6개월", 180), ("1년", 365), ("2년", 730))
-
-    def on_period_changed(self):
-        """조회 기간 콤보 변경 시 날짜칸을 자동 반영. '직접 입력'만 날짜칸 활성화."""
-        text = self.period_combo.currentText()
-        manual = text.startswith("직접")
-        self.start_date_edit.setEnabled(manual)
-        self.end_date_edit.setEnabled(manual)
-        if manual:
-            return
-        today = QtCore.QDate.currentDate()
-        days = None
-        for keyword, preset_days in self._PERIOD_PRESET_DAYS:
-            if keyword in text:
-                days = preset_days
-                break
-        self.start_date_edit.setDate(today.addDays(-days) if days else QtCore.QDate(2015, 1, 1))
-        self.end_date_edit.setDate(today)
 
     def _period_desc(self):
         """결과 안내 메시지에 쓸 조회 기간 설명 문자열."""
-        text = self.period_combo.currentText()
-        if text.startswith("전체"):
-            return "전체"
-        if text.startswith("직접"):
-            return f"{self.start_date_edit.date().toString('yyyy.MM.dd')} ~ {self.end_date_edit.date().toString('yyyy.MM.dd')}"
-        return text
+        return f"{self.start_date_edit.date().toString('yyyy.MM.dd')} ~ {self.end_date_edit.date().toString('yyyy.MM.dd')}"
 
     def load_memories(self):
         if not self.driver: return
@@ -1703,18 +1665,14 @@ class KidsnoteApp(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "경고", "수집할 대상을 최소 하나 이상 선택하세요.")
             return
 
-        # 조회 기간 확정 (날짜칸이 단일 기준 — 프리셋도 여기 반영되어 있음)
-        period_text = self.period_combo.currentText()
-        limit_date_str = None
-        end_date_str = None
-        if not period_text.startswith("전체"):
-            start_qdate = self.start_date_edit.date()
-            end_qdate = self.end_date_edit.date()
-            if start_qdate > end_qdate:
-                QtWidgets.QMessageBox.warning(self, "기간 오류", "시작 날짜가 종료 날짜보다 늦습니다.\n조회 기간을 다시 확인해 주세요.")
-                return
-            limit_date_str = start_qdate.toString("yyyy.MM.dd")
-            end_date_str = end_qdate.toString("yyyy.MM.dd")
+        # 조회 기간 확정 (날짜칸이 단일 기준)
+        start_qdate = self.start_date_edit.date()
+        end_qdate = self.end_date_edit.date()
+        if start_qdate > end_qdate:
+            QtWidgets.QMessageBox.warning(self, "기간 오류", "시작 날짜가 종료 날짜보다 늦습니다.\n조회 기간을 다시 확인해 주세요.")
+            return
+        limit_date_str = start_qdate.toString("yyyy.MM.dd")
+        end_date_str = end_qdate.toString("yyyy.MM.dd")
 
         self.status_label.setText('목록 불러오는 중...')
         self._set_shared_controls_enabled(False)
@@ -2087,12 +2045,14 @@ class KidsnoteApp(QtWidgets.QWidget):
             status_msg += "\n(다운로드가 사용자에 의해 중도 중지되었습니다.)\n"
 
         network_blocked = bool(getattr(self.download_thread, 'network_blocked', False))
-        if network_blocked or (success_cnt == 0 and fail_cnt > 0 and not is_stopped):
+        if success_cnt == 0 and fail_cnt > 0 and not is_stopped:
             status_msg += (
-                "\n⚠ 사진 서버 직접 접근이 차단된 환경으로 보입니다.\n"
-                "회사 등 보안 네트워크의 프록시가 원인일 수 있으며,\n"
-                "이 경우 가정 네트워크에서 다시 시도하시길 권장합니다.\n"
+                "\n⚠ 모든 항목이 실패했습니다.\n"
+                "네트워크 보안 정책이 미디어 접근을 차단했을 가능성이 있습니다.\n"
+                "PDF 저장 모드는 정상 동작할 수 있으니 함께 시도해 보세요.\n"
             )
+        elif network_blocked and success_cnt > 0:
+            status_msg += "\n(직접 접근 차단 환경이라 브라우저 경유 방식으로 받았습니다.)\n"
 
         reply = self._show_top_question("다운로드 완료", status_msg + "\n지금 폴더를 열어보시겠습니까?")
         

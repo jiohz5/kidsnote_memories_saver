@@ -7,8 +7,8 @@ set "PROJECT_ROOT=C:\edu\samsung-rpa-project-master"
 set "BUILD_PY=%PROJECT_ROOT%\venv_build\Scripts\python.exe"
 set "DRIVER_PATH=%SCRIPT_DIR%msedgedriver.exe"
 if not exist "%DRIVER_PATH%" set "DRIVER_PATH=%PROJECT_ROOT%\msedgedriver.exe"
-set "APP_NAME=Kidsnote_Memories_Saver_V1.02"
-set "RELEASE_DIR=Kidsnote_Release_V1.02"
+set "APP_NAME=Kidsnote_Memories_Saver_V1.03"
+set "RELEASE_DIR=Kidsnote_Release_V1.03"
 
 REM 빌드 모드: 기본 onedir(폴더 배포).
 REM  - onedir: 실행 시 임시폴더(MEIxxxx) 추출이 없어 시작이 빠르고,
@@ -18,14 +18,14 @@ set "BUILD_MODE=%~1"
 if "%BUILD_MODE%"=="" set "BUILD_MODE=onedir"
 if /I "%BUILD_MODE%"=="onefile" (
     set "MODE_FLAG=--onefile"
-    set "RELEASE_DIR=Kidsnote_Release_V1.02_onefile"
+    set "RELEASE_DIR=Kidsnote_Release_V1.03_onefile"
 ) else (
     set "BUILD_MODE=onedir"
     set "MODE_FLAG=--onedir"
 )
 
 echo ===================================================
-echo [Kidsnote Memories Saver V1.02] Release Build
+echo [Kidsnote Memories Saver V1.03] Release Build
 echo ===================================================
 echo.
 
@@ -87,4 +87,5 @@ echo ===================================================
 echo Release ready: %SCRIPT_DIR%%RELEASE_DIR%.zip  (mode: %BUILD_MODE%)
 echo ===================================================
 endlocal
+
 
