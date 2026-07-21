@@ -1,5 +1,6 @@
 import os
 import time
+import re
 import requests
 import json
 import base64
@@ -797,22 +798,19 @@ def navigate_to_memory_view(driver, item_type_label, log_func, target_child=None
                     }
                     return false;
                 """
-                driver.execute_script(script, target_child)
+                matched = driver.execute_script(script, target_child)
+                if not matched:
+                    log_func(f"[KN-DIAG] 아이 매칭 실패(이름: {target_child}) → 재진입 시도")
                 time.sleep(0.5)
                 driver.get("https://www.kidsnote.com/service")
                 wait_css(driver, "span[role='img']", timeout=10)
             except Exception as e:
                 log_func(f"아이 전환 중 예외 (무시): {e}")
 
-        # 이미 추억보기 화면(전체보기 버튼 노출)이라면 메뉴 클릭 단계를 통째로 생략.
-        # SPA는 URL이 /service 그대로인 채 화면만 바뀌므로 URL 판단만으로는 부족하다.
+        # 참고: 예전에는 '전체보기 버튼이 보이면 메뉴 클릭 생략' 지름길이 있었으나 제거했다.
+        # SPA는 URL이 /service 그대로라 이전 아이의 잔상 화면을 '이미 추억보기'로 오판할 수 있어,
+        # 아이 매칭 후에는 항상 추억보기 메뉴를 눌러 해당 아이의 목록으로 확실히 진입한다.
         clicked = False
-        try:
-            if any(b.is_displayed() for b in driver.find_elements(By.XPATH, "//*[contains(text(),'전체보기')]")):
-                log_func("이미 추억보기 화면입니다. 메뉴 클릭을 생략합니다.")
-                clicked = True
-        except Exception:
-            pass
 
         # 추억보기 1순위 클릭
         if not clicked:
@@ -1248,10 +1246,11 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
 
         raw_media = driver.execute_script("""
             const items = [];
-            const add = (url, kind, w, h) => {
-              if (url) items.push({url, kind, w: w || 0, h: h || 0});
+            const add = (url, kind, w, h, dw, dh) => {
+              if (url) items.push({url, kind, w: w || 0, h: h || 0, dw: dw || 0, dh: dh || 0});
             };
             document.querySelectorAll('img').forEach(img => {
+              const dw = img.offsetWidth || 0, dh = img.offsetHeight || 0;
               [
                 img.currentSrc,
                 img.src,
@@ -1260,23 +1259,23 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
                 img.getAttribute('data-src'),
                 img.getAttribute('data-big'),
                 img.getAttribute('data-url')
-              ].forEach(url => add(url, 'image', img.naturalWidth, img.naturalHeight));
-              add(img.getAttribute('srcset'), 'srcset', img.naturalWidth, img.naturalHeight);
+              ].forEach(url => add(url, 'image', img.naturalWidth, img.naturalHeight, dw, dh));
+              add(img.getAttribute('srcset'), 'srcset', img.naturalWidth, img.naturalHeight, dw, dh);
               const parentLink = img.closest('a');
-              if (parentLink) add(parentLink.href, 'image-link', img.naturalWidth, img.naturalHeight);
+              if (parentLink) add(parentLink.href, 'image-link', img.naturalWidth, img.naturalHeight, dw, dh);
             });
             document.querySelectorAll('video').forEach(video => {
-              add(video.currentSrc || video.src, 'video', video.videoWidth, video.videoHeight);
-              video.querySelectorAll('source').forEach(source => add(source.src || source.getAttribute('src'), 'video', 0, 0));
+              add(video.currentSrc || video.src, 'video', video.videoWidth, video.videoHeight, video.offsetWidth, video.offsetHeight);
+              video.querySelectorAll('source').forEach(source => add(source.src || source.getAttribute('src'), 'video', 0, 0, video.offsetWidth, video.offsetHeight));
             });
-            document.querySelectorAll('source').forEach(source => add(source.src || source.getAttribute('src'), 'source', 0, 0));
+            document.querySelectorAll('source').forEach(source => add(source.src || source.getAttribute('src'), 'source', 0, 0, 0, 0));
             document.querySelectorAll('*').forEach(el => {
               const bg = window.getComputedStyle(el).backgroundImage;
               if (bg && bg.includes('url(')) {
                 const matches = bg.match(/url\\(["']?([^"')]+)["']?\\)/g) || [];
                 matches.forEach(match => {
                   const url = match.replace(/^url\\(["']?/, '').replace(/["']?\\)$/, '');
-                  add(url, 'background', el.offsetWidth, el.offsetHeight);
+                  add(url, 'background', el.offsetWidth, el.offsetHeight, el.offsetWidth, el.offsetHeight);
                 });
               }
             });
@@ -1302,21 +1301,39 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
                     continue
             width = int(item.get("w") or 0)
             height = int(item.get("h") or 0)
+            disp = max(int(item.get("dw") or 0), int(item.get("dh") or 0))
+            path_only = lower_src.split("?")[0]
             is_tiny_ui_asset = 0 < max(width, height) <= 96
             looks_like_ui_asset = any(token in lower_src for token in ["profile", "avatar", "icon", "logo", "sprite"])
-            if lower_src.endswith(".svg") or (looks_like_ui_asset and is_tiny_ui_asset) or (looks_like_ui_asset and width == 0 and height == 0):
+            # 프로필 아바타 제외: (1) 아바타 썸네일 URL 패턴(img_36x36/65x65/130x130/240x240) — 강한 신호,
+            # (2) 화면에 아주 작게(<=90px, 앨범 썸네일 그리드는 보통 150px+이므로 안전) 표시되는 이미지
+            is_small_display = 0 < disp <= 90
+            is_avatar_thumb = bool(re.search(r'img_(36x36|65x65|130x130|240x240)\.', path_only))
+            if (
+                lower_src.endswith(".svg")
+                or is_small_display
+                or is_avatar_thumb
+                or (looks_like_ui_asset and is_tiny_ui_asset)
+                or (looks_like_ui_asset and width == 0 and height == 0)
+            ):
                 continue
             if src in seen_srcs:
                 continue
             seen_srcs.add(src)
             media_srcs.append(src)
 
-        # 화면에 렌더링된 큰 이미지 요소 목록 (URL 다운로드가 전부 막히면 캡처 폴백에 사용)
+        # 화면에 렌더링된 '크게 표시되는' 이미지 요소 목록 (URL 다운로드가 전부 막히면 캡처 폴백)
+        # 표시 크기(offsetWidth) 기준으로 걸러 프로필 아바타 같은 작은 이미지는 제외한다.
         large_img_elements = []
         try:
             for _img in driver.find_elements(By.TAG_NAME, "img"):
                 try:
-                    if int(_img.get_attribute("naturalWidth") or 0) >= 200:
+                    disp_w = int(_img.get_attribute("offsetWidth") or 0)
+                    nat_w = int(_img.get_attribute("naturalWidth") or 0)
+                    src_attr = (_img.get_attribute("src") or "").lower().split("?")[0]
+                    if re.search(r'img_(36x36|65x65|130x130|240x240)\.', src_attr):
+                        continue  # 아바타 썸네일 제외
+                    if disp_w >= 200 and nat_w >= 200:
                         large_img_elements.append(_img)
                 except Exception:
                     continue

@@ -688,7 +688,7 @@ class KidsnoteApp(QtWidgets.QWidget):
             "전체", "최근 1주일", "최근 1개월", "최근 3개월",
             "최근 6개월", "최근 1년", "직접 지정",
         ])
-        self.period_combo.setCurrentIndex(0)
+        self.period_combo.setCurrentText("최근 1주일")  # 기본: 최근 1주일 (부담 없는 범위)
         period_layout.addWidget(self.period_combo)
 
         # 날짜 범위 칸 — 프리셋 선택 시 자동 반영(비활성), '직접 지정' 선택 시 활성화
@@ -697,7 +697,7 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.start_date_edit = QtWidgets.QDateEdit()
         self.start_date_edit.setDisplayFormat("yyyy.MM.dd")
         self.start_date_edit.setCalendarPopup(True)
-        self.start_date_edit.setDate(QtCore.QDate(2000, 1, 1))  # 사실상 '전체'
+        self.start_date_edit.setDate(QtCore.QDate.currentDate().addDays(-7))  # 기본: 최근 1주일
         self.end_date_edit = QtWidgets.QDateEdit()
         self.end_date_edit.setDisplayFormat("yyyy.MM.dd")
         self.end_date_edit.setCalendarPopup(True)
