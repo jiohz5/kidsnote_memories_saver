@@ -334,29 +334,39 @@ def get_profile_image_b64(driver, url, log=None):
     순서: ① 브라우저 fetch(원본 화질, 사내망에서도 브라우저 네트워크는 대개 열림)
          ② 파이썬 requests 세션
          ③ 화면의 활성 아바타 요소 캡처(무엇도 안 될 때 최후, 표시 해상도)
+    모두 실패하면 [KN-DIAG] 태그로 세 방법의 사유를 한 줄에 남긴다(사용자 복사용).
     """
     def _log(msg):
         if log:
             log(msg)
+
+    fetch_r = req_r = shot_r = "미시도"
 
     # ① 브라우저 컨텍스트 fetch
     if url:
         try:
             data, status = _browser_fetch_media(driver, url, timeout=15)
             if data:
+                _log("[KN-DIAG] 프로필 성공(브라우저fetch)")
                 return base64.b64encode(data).decode('utf-8')
-            _log(f"DEBUG: 프로필 브라우저 fetch 실패({status}) → 다른 방법 시도")
+            fetch_r = status
         except Exception as e:
-            _log(f"DEBUG: 프로필 브라우저 fetch 예외 - {type(e).__name__}")
+            fetch_r = f"EXC:{type(e).__name__}"
+    else:
+        fetch_r = "URL없음"
 
     # ② 파이썬 requests 세션
     if url:
         try:
             data, _ct = fetch_bytes_with_browser_session(driver, url, timeout=5)
             if data:
+                _log("[KN-DIAG] 프로필 성공(requests)")
                 return base64.b64encode(data).decode('utf-8')
+            req_r = "빈응답"
         except Exception as e:
-            _log(f"DEBUG: 프로필 requests 실패 - {type(e).__name__}")
+            req_r = f"EXC:{type(e).__name__}"
+    else:
+        req_r = "URL없음"
 
     # ③ 활성 아바타 요소 캡처 (네트워크 불필요)
     try:
@@ -367,11 +377,13 @@ def get_profile_image_b64(driver, url, log=None):
             pass
         shot = _element_screenshot_b64(avatar, log)
         if shot:
-            _log("DEBUG: 프로필을 화면 캡처로 대체(표시 해상도)")
+            _log("[KN-DIAG] 프로필 성공(화면캡처/표시해상도)")
             return shot
-        _log("DEBUG: 프로필 아바타 캡처도 실패")
+        shot_r = "캡처빈값"
     except Exception as e:
-        _log(f"DEBUG: 프로필 아바타 요소 없음 - {type(e).__name__}")
+        shot_r = f"요소없음:{type(e).__name__}"
+
+    _log(f"[KN-DIAG] 프로필 실패 | fetch={fetch_r} | requests={req_r} | capture={shot_r}")
     return ""
 
 
@@ -1315,6 +1327,7 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
         failed_count = 0
         browser_fallback_used = False
         capture_fallback_used = False
+        fail_reasons = []  # [KN-DIAG] 요약용 실패 사유 모음
         prefix_str = _media_prefix(post_info)
         for idx, src in enumerate(media_srcs):
             if _stop_requested(check_stop_callback):
@@ -1387,7 +1400,10 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
 
             if not saved:
                 failed_count += 1
-                log(f"DEBUG: 미디어 다운로드 실패 ({fail_status.strip()})")
+                reason = fail_status.strip()
+                if reason:
+                    fail_reasons.append(reason)
+                log(f"DEBUG: 미디어 다운로드 실패 ({reason})")
 
         # 3차(최후): 직접·브라우저 fetch가 모두 막힌 경우(프록시가 이미지 CDN 완전 차단 등)
         # 화면에 이미 보이는 이미지를 캡처해서라도 저장한다. 화질은 표시 해상도 수준.
@@ -1421,6 +1437,12 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
             log("직접 접근이 차단되어 일부/전체 파일을 브라우저 경유 방식으로 받았습니다.")
         if capture_fallback_used:
             log("네트워크가 막혀 화면 캡처본으로 저장했습니다. (원본보다 화질이 낮을 수 있어요)")
+
+        # 진단 요약(사용자 복사용): 실패가 있었을 때만 대표 사유를 한 줄로 남긴다
+        if failed_count or (count == 0 and media_srcs):
+            reason_str = "; ".join(sorted(set(fail_reasons))[:4]) or "사유미상"
+            method = "캡처" if capture_fallback_used else ("브라우저" if browser_fallback_used else "직접")
+            log(f"[KN-DIAG] 미디어 실패 | 총{len(media_srcs)} 성공{count}({method}) 실패{failed_count} | 사유={reason_str}")
 
         log(f"{post_info['title']}: {count}개의 파일(사진/동영상) 다운로드 완료.")
         if count == 0:

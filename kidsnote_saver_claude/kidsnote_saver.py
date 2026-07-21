@@ -180,7 +180,9 @@ class DownloadThread(QtCore.QThread):
                 if not manager.probe_direct_access(self.driver):
                     self.network_blocked = True
                     write_app_log("Direct network access probe failed -> switching to browser-fetch mode")
-                    self.status_signal.emit("직접 접근이 차단된 환경 감지 → 브라우저 경유 다운로드로 자동 전환합니다.")
+                    self.status_signal.emit("[KN-DIAG] 사전점검: 직접접근 차단 → 브라우저 경유 모드")
+                else:
+                    self.status_signal.emit("[KN-DIAG] 사전점검: 직접접근 정상")
 
             date_type_counts = {}
             total = len(self.indices)
@@ -614,6 +616,14 @@ class KidsnoteApp(QtWidgets.QWidget):
             }}
         """)
         status_prog_layout.addWidget(self.progress_bar, stretch=2)
+
+        # 진단 정보 복사 버튼 — 문제 발생 시 원클릭으로 [KN-DIAG] 로그를 클립보드에 담아 개발자에게 전달
+        self.diag_btn = QtWidgets.QPushButton("🔧 진단정보 복사")
+        self.diag_btn.setToolTip("사진/프로필이 안 될 때 눌러 진단 로그를 복사한 뒤 붙여넣어 전달하세요.")
+        self.diag_btn.clicked.connect(self.copy_diagnostics)
+        self.diag_btn.setFixedHeight(FS(34))
+        self.diag_btn.setStyleSheet(f"QPushButton {{ background-color: #64748B; color: white; font-weight: bold; border-radius: {S(5)}px; padding: 0 {S(8)}px; font-size: {FS(12)}px; }} QPushButton:hover {{ background-color: #475569; }}")
+        status_prog_layout.addWidget(self.diag_btn)
         main_layout.addLayout(status_prog_layout)
 
         # Collect Options Group (1단계: 아이 현황 및 수집 범위)
@@ -1516,6 +1526,11 @@ class KidsnoteApp(QtWidgets.QWidget):
                         if not img_b64 and shot_b64:
                             img_b64 = shot_b64
 
+                        # 진단(복사용): 이 아이의 프로필 확보 결과를 한 줄로 남긴다
+                        got = "성공" if img_b64 else "실패"
+                        source = "네트워크" if (img_b64 and not shot_b64) else ("화면캡처" if img_b64 else "없음")
+                        self.update_status(f"[KN-DIAG] 프로필({name}) {got} | 방식={source} | URL={'있음' if url else '없음'} | 캡처={'있음' if shot_b64 else '없음'}")
+
                         click_elem = click_elems[idx] if idx < len(click_elems) else None
                         self.children_data.append({
                             "text": text_val, 
@@ -1927,6 +1942,11 @@ class KidsnoteApp(QtWidgets.QWidget):
             # 진단 정보로 '정상 조회했으나 0건'과 '조회 자체 실패'를 구분해 안내
             info = getattr(self.scrape_thread, 'result_info', None) or {}
             period_text = self._period_desc()
+            self.update_status(
+                f"[KN-DIAG] 조회0건 | nav_failed={info.get('nav_failed', False)} "
+                f"list_loaded={info.get('list_loaded', False)} items_seen={info.get('items_seen', 0)} "
+                f"filtered_out={info.get('filtered_out', 0)} timeout={info.get('timeout', False)} 기간={period_text}"
+            )
 
             if info.get('filtered_out', 0) > 0:
                 # 목록은 정상적으로 열렸고 게시물도 있었지만, 전부 조회 기간 범위 밖
@@ -2175,7 +2195,44 @@ class KidsnoteApp(QtWidgets.QWidget):
             self.profile_img_label.setText("")
 
     def update_status(self, msg):
+        # 진단 마커가 붙은 줄은 로그 파일에도 남겨 사용자가 나중에 긁어올 수 있게 한다
+        if isinstance(msg, str) and "[KN-DIAG]" in msg:
+            write_app_log(msg)
         self.run_on_ui_thread(lambda: self.status_label.setText(msg))
+
+    def copy_diagnostics(self):
+        """오늘 로그의 [KN-DIAG] 진단 라인을 클립보드에 복사 (문제 신고용)."""
+        import glob
+        lines = []
+        try:
+            for path in sorted(glob.glob(os.path.join(_app_log_dir(), "app_*.log")))[-2:]:
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        lines.extend([ln.rstrip() for ln in f if "[KN-DIAG]" in ln])
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        header = [
+            f"Kidsnote Saver {APP_VERSION} 진단정보",
+            f"시각: {datetime.datetime.now():%Y-%m-%d %H:%M:%S}",
+            f"로그 위치: {_app_log_dir()}",
+            "-" * 40,
+        ]
+        if lines:
+            body = lines[-40:]  # 최근 40줄
+        else:
+            body = ["(아직 [KN-DIAG] 진단 기록이 없습니다. 사진/프로필 조회를 한 번 실행한 뒤 다시 눌러주세요.)"]
+        text = "\n".join(header + body)
+
+        QtWidgets.QApplication.clipboard().setText(text)
+        self._show_top_message(
+            QtWidgets.QMessageBox.Information,
+            "진단정보 복사 완료",
+            f"진단정보 {len(lines)}줄을 클립보드에 복사했습니다.\n\n"
+            f"채팅창에 그대로 붙여넣기(Ctrl+V) 해서 전달해 주세요.\n\n로그 폴더:\n{_app_log_dir()}",
+        )
 
     def enable_widget(self, widget, enabled):
         self.run_on_ui_thread(lambda: widget.setEnabled(enabled))
