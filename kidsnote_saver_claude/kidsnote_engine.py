@@ -311,6 +311,70 @@ def fetch_bytes_with_browser_session(driver, url, session=None, referer=None, ti
     return response.content, content_type
 
 
+def _element_screenshot_b64(element, log=None):
+    """WebElement를 브라우저에서 직접 캡처해 base64(PNG) 반환. 실패 시 ''.
+
+    프록시가 이미지 CDN을 차단(직접 다운로드·브라우저 fetch 모두 불가)해도
+    화면에 이미 렌더링된 요소는 캡처할 수 있다. 화질은 표시 해상도 수준.
+    """
+    if element is None:
+        return ""
+    try:
+        b64 = element.screenshot_as_base64
+        return b64 or ""
+    except Exception as e:
+        if log:
+            log(f"DEBUG: 요소 캡처 실패 - {type(e).__name__}: {e}")
+        return ""
+
+
+def get_profile_image_b64(driver, url, log=None):
+    """프로필(아이 얼굴) 이미지를 가장 견고한 방법으로 확보해 base64 반환.
+
+    순서: ① 브라우저 fetch(원본 화질, 사내망에서도 브라우저 네트워크는 대개 열림)
+         ② 파이썬 requests 세션
+         ③ 화면의 활성 아바타 요소 캡처(무엇도 안 될 때 최후, 표시 해상도)
+    """
+    def _log(msg):
+        if log:
+            log(msg)
+
+    # ① 브라우저 컨텍스트 fetch
+    if url:
+        try:
+            data, status = _browser_fetch_media(driver, url, timeout=15)
+            if data:
+                return base64.b64encode(data).decode('utf-8')
+            _log(f"DEBUG: 프로필 브라우저 fetch 실패({status}) → 다른 방법 시도")
+        except Exception as e:
+            _log(f"DEBUG: 프로필 브라우저 fetch 예외 - {type(e).__name__}")
+
+    # ② 파이썬 requests 세션
+    if url:
+        try:
+            data, _ct = fetch_bytes_with_browser_session(driver, url, timeout=5)
+            if data:
+                return base64.b64encode(data).decode('utf-8')
+        except Exception as e:
+            _log(f"DEBUG: 프로필 requests 실패 - {type(e).__name__}")
+
+    # ③ 활성 아바타 요소 캡처 (네트워크 불필요)
+    try:
+        avatar = driver.find_element(By.CSS_SELECTOR, "span[role='img'][size='65']")
+        try:
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", avatar)
+        except Exception:
+            pass
+        shot = _element_screenshot_b64(avatar, log)
+        if shot:
+            _log("DEBUG: 프로필을 화면 캡처로 대체(표시 해상도)")
+            return shot
+        _log("DEBUG: 프로필 아바타 캡처도 실패")
+    except Exception as e:
+        _log(f"DEBUG: 프로필 아바타 요소 없음 - {type(e).__name__}")
+    return ""
+
+
 def _best_url_from_srcset(srcset):
     if not srcset:
         return ""
@@ -904,22 +968,8 @@ def fetch_memory_list(driver, status_callback=None, item_found_callback=None, ch
             profile_text = f"{name} {age}".strip()
             log(f"프로필 획득: {profile_text}")
             
-            img_b64 = None
-            if url:
-                try:
-                    img_data, _ = fetch_bytes_with_browser_session(driver, url, timeout=3)
-                    img_b64 = base64.b64encode(img_data).decode('utf-8')
-                except Exception as e:
-                    log(f"프로필 사진 획득 실패 (무시됨) - {e}")
-
-            # 사내망 등에서 직접 다운로드가 차단된 경우, 화면에 이미 렌더링된
-            # 아바타 요소를 브라우저에서 캡처해 대체 (네트워크 불필요)
-            if not img_b64:
-                try:
-                    avatar_elem = driver.find_element(By.CSS_SELECTOR, "span[role='img'][size='65']")
-                    img_b64 = avatar_elem.screenshot_as_base64
-                except Exception:
-                    pass
+            # 브라우저 fetch → requests → 요소 캡처 순으로 가장 견고하게 확보
+            img_b64 = get_profile_image_b64(driver, url, log) or None
 
             if profile_found_callback:
                 profile_found_callback({"text": profile_text, "image": img_b64})
@@ -945,11 +995,18 @@ def fetch_memory_list(driver, status_callback=None, item_found_callback=None, ch
             collected = len(memories) - before
 
             # 비정상 0건 판단: 진입 실패 / 타임아웃 / 카드가 보였는데 전부 파싱 불가(스켈레톤)
+            #   + 날짜 필터가 없는데 카드 자체가 0개(= SPA가 아직 안 뜬 것으로 의심)
             parse_failed = (
                 attempt_info.get('items_seen', 0) > 0
                 and attempt_info.get('filtered_out', 0) == 0
             )
-            abnormal_empty = collected == 0 and (not nav_ok or attempt_info.get('timeout') or parse_failed)
+            no_items_unfiltered = (
+                attempt_info.get('items_seen', 0) == 0
+                and attempt_info.get('filtered_out', 0) == 0
+            )
+            abnormal_empty = collected == 0 and (
+                not nav_ok or attempt_info.get('timeout') or parse_failed or no_items_unfiltered
+            )
             stopped = bool(check_stop_callback and check_stop_callback())
             if attempt == 1 and abnormal_empty and not stopped:
                 log(f"{label} 조회가 비정상 종료되어 화면을 새로 고친 뒤 한 번 더 시도합니다...")
@@ -1242,9 +1299,22 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
             seen_srcs.add(src)
             media_srcs.append(src)
 
+        # 화면에 렌더링된 큰 이미지 요소 목록 (URL 다운로드가 전부 막히면 캡처 폴백에 사용)
+        large_img_elements = []
+        try:
+            for _img in driver.find_elements(By.TAG_NAME, "img"):
+                try:
+                    if int(_img.get_attribute("naturalWidth") or 0) >= 200:
+                        large_img_elements.append(_img)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
         count = 0
         failed_count = 0
         browser_fallback_used = False
+        capture_fallback_used = False
         prefix_str = _media_prefix(post_info)
         for idx, src in enumerate(media_srcs):
             if _stop_requested(check_stop_callback):
@@ -1319,8 +1389,38 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
                 failed_count += 1
                 log(f"DEBUG: 미디어 다운로드 실패 ({fail_status.strip()})")
 
+        # 3차(최후): 직접·브라우저 fetch가 모두 막힌 경우(프록시가 이미지 CDN 완전 차단 등)
+        # 화면에 이미 보이는 이미지를 캡처해서라도 저장한다. 화질은 표시 해상도 수준.
+        # media_srcs가 있을 때만(= 받을 사진이 있었는데 전부 실패) 캡처 — 텍스트 전용 글은 제외.
+        if count == 0 and media_srcs and large_img_elements:
+            log("직접·브라우저 다운로드가 모두 막혀 화면 캡처 방식으로 저장을 시도합니다...")
+            # 실제 미디어 개수만큼만 캡처 (UI 이미지 과잉 저장 방지)
+            for _img in large_img_elements[:len(media_srcs)]:
+                if _stop_requested(check_stop_callback):
+                    log("다운로드가 중지되었습니다.")
+                    return False
+                try:
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", _img)
+                    time.sleep(0.15)
+                except Exception:
+                    pass
+                shot = _element_screenshot_b64(_img, log)
+                if not shot:
+                    continue
+                try:
+                    file_path = os.path.join(target_dir, f"{prefix_str}_{count+1}.png")
+                    with open(file_path, "wb") as f:
+                        f.write(base64.b64decode(shot))
+                    _apply_post_timestamp(file_path, post_info)
+                    count += 1
+                    capture_fallback_used = True
+                except Exception:
+                    continue
+
         if browser_fallback_used:
             log("직접 접근이 차단되어 일부/전체 파일을 브라우저 경유 방식으로 받았습니다.")
+        if capture_fallback_used:
+            log("네트워크가 막혀 화면 캡처본으로 저장했습니다. (원본보다 화질이 낮을 수 있어요)")
 
         log(f"{post_info['title']}: {count}개의 파일(사진/동영상) 다운로드 완료.")
         if count == 0:

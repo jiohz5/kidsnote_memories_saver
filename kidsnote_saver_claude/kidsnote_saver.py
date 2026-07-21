@@ -670,9 +670,18 @@ class KidsnoteApp(QtWidgets.QWidget):
         chk_layout.addWidget(self.chk_album)
         btn_layout.addLayout(chk_layout)
 
-        # 조회 기간 — 날짜 범위 직접 지정 (기본값: 전체 기간에 해당하는 넓은 범위)
+        # 조회 기간 — 프리셋 드롭다운 + 날짜 범위 칸
         period_layout = QtWidgets.QVBoxLayout()
-        period_layout.addWidget(QtWidgets.QLabel("조회 기간 (달력 클릭으로 변경):"))
+        period_layout.addWidget(QtWidgets.QLabel("조회 기간:"))
+        self.period_combo = QtWidgets.QComboBox()
+        self.period_combo.addItems([
+            "전체", "최근 1주일", "최근 1개월", "최근 3개월",
+            "최근 6개월", "최근 1년", "직접 지정",
+        ])
+        self.period_combo.setCurrentIndex(0)
+        period_layout.addWidget(self.period_combo)
+
+        # 날짜 범위 칸 — 프리셋 선택 시 자동 반영(비활성), '직접 지정' 선택 시 활성화
         date_range_layout = QtWidgets.QHBoxLayout()
         date_range_layout.setSpacing(FS(4))
         self.start_date_edit = QtWidgets.QDateEdit()
@@ -687,6 +696,9 @@ class KidsnoteApp(QtWidgets.QWidget):
         date_range_layout.addWidget(QtWidgets.QLabel("~"))
         date_range_layout.addWidget(self.end_date_edit)
         period_layout.addLayout(date_range_layout)
+
+        self.period_combo.currentIndexChanged.connect(self.on_period_changed)
+        self.on_period_changed()  # 초기 상태(전체) 반영
         btn_layout.addLayout(period_layout)
 
         # 추억 목록 불러오기 / 작업 중지 버튼 (세로 배치)
@@ -1418,9 +1430,14 @@ class KidsnoteApp(QtWidgets.QWidget):
                     shot_b64 = ""
                     try:
                         avatar_elem = self.driver.find_element(By.CSS_SELECTOR, "span[role='img'][size='65']")
-                        shot_b64 = avatar_elem.screenshot_as_base64
-                    except Exception:
-                        pass
+                        try:
+                            self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", avatar_elem)
+                            _time.sleep(0.2)
+                        except Exception:
+                            pass
+                        shot_b64 = avatar_elem.screenshot_as_base64 or ""
+                    except Exception as _shot_e:
+                        write_app_log(f"Profile avatar capture failed for {name}: {type(_shot_e).__name__}")
 
                     child_array.append([name, age, url, orig_url, shot_b64])
                 
@@ -1469,13 +1486,27 @@ class KidsnoteApp(QtWidgets.QWidget):
                                 except:
                                     pass
                                 return base64.b64encode(img_data).decode('utf-8')
-                            for candidate_url in profile_url_candidates(url, orig_url):
+
+                            candidates = profile_url_candidates(url, orig_url)
+                            # 1순위: 브라우저 fetch (사내망 프록시도 브라우저 네트워크는 대개 열림, 원본 화질)
+                            for candidate_url in candidates:
                                 try:
-                                    img_b64 = fetch_img(candidate_url)
-                                    if img_b64:
+                                    data, _status = manager._browser_fetch_media(self.driver, candidate_url, timeout=12)
+                                    if data:
+                                        import base64
+                                        img_b64 = base64.b64encode(data).decode('utf-8')
                                         break
                                 except Exception:
                                     continue
+                            # 2순위: 파이썬 requests 세션
+                            if not img_b64:
+                                for candidate_url in candidates:
+                                    try:
+                                        img_b64 = fetch_img(candidate_url)
+                                        if img_b64:
+                                            break
+                                    except Exception:
+                                        continue
                             if img_b64:
                                 img_fetch_fail_streak = 0
                             else:
@@ -1648,12 +1679,42 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.load_btn.setEnabled(enabled)
         self.chk_report.setEnabled(enabled)
         self.chk_album.setEnabled(enabled)
-        self.start_date_edit.setEnabled(enabled)
-        self.end_date_edit.setEnabled(enabled)
+        self.period_combo.setEnabled(enabled)
+        if enabled:
+            self.on_period_changed()  # '직접 지정' 모드였다면 날짜칸 활성 상태를 복원
+        else:
+            self.start_date_edit.setEnabled(False)
+            self.end_date_edit.setEnabled(False)
         self.child_combo.setEnabled(enabled and bool(getattr(self, 'children_data', None)))
+
+    # 프리셋 텍스트 → 오늘로부터의 일수 (전체/직접 지정은 별도 처리)
+    _PERIOD_PRESET_DAYS = (
+        ("1주일", 7), ("1개월", 30), ("3개월", 90), ("6개월", 180), ("1년", 365),
+    )
+
+    def on_period_changed(self):
+        """조회 기간 콤보 변경 시 날짜칸을 자동 반영. '직접 지정'만 날짜칸 활성화."""
+        text = self.period_combo.currentText()
+        manual = text.startswith("직접")
+        self.start_date_edit.setEnabled(manual)
+        self.end_date_edit.setEnabled(manual)
+        if manual:
+            return
+        today = QtCore.QDate.currentDate()
+        self.end_date_edit.setDate(today)
+        if text.startswith("전체"):
+            self.start_date_edit.setDate(QtCore.QDate(2000, 1, 1))
+            return
+        for keyword, preset_days in self._PERIOD_PRESET_DAYS:
+            if keyword in text:
+                self.start_date_edit.setDate(today.addDays(-preset_days))
+                return
 
     def _period_desc(self):
         """결과 안내 메시지에 쓸 조회 기간 설명 문자열."""
+        text = self.period_combo.currentText()
+        if text.startswith("전체"):
+            return "전체"
         return f"{self.start_date_edit.date().toString('yyyy.MM.dd')} ~ {self.end_date_edit.date().toString('yyyy.MM.dd')}"
 
     def load_memories(self):
@@ -1665,14 +1726,18 @@ class KidsnoteApp(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "경고", "수집할 대상을 최소 하나 이상 선택하세요.")
             return
 
-        # 조회 기간 확정 (날짜칸이 단일 기준)
-        start_qdate = self.start_date_edit.date()
-        end_qdate = self.end_date_edit.date()
-        if start_qdate > end_qdate:
-            QtWidgets.QMessageBox.warning(self, "기간 오류", "시작 날짜가 종료 날짜보다 늦습니다.\n조회 기간을 다시 확인해 주세요.")
-            return
-        limit_date_str = start_qdate.toString("yyyy.MM.dd")
-        end_date_str = end_qdate.toString("yyyy.MM.dd")
+        # 조회 기간 확정 ('전체'는 필터 없음, 그 외는 날짜칸 기준)
+        if self.period_combo.currentText().startswith("전체"):
+            limit_date_str = None
+            end_date_str = None
+        else:
+            start_qdate = self.start_date_edit.date()
+            end_qdate = self.end_date_edit.date()
+            if start_qdate > end_qdate:
+                QtWidgets.QMessageBox.warning(self, "기간 오류", "시작 날짜가 종료 날짜보다 늦습니다.\n조회 기간을 다시 확인해 주세요.")
+                return
+            limit_date_str = start_qdate.toString("yyyy.MM.dd")
+            end_date_str = end_qdate.toString("yyyy.MM.dd")
 
         self.status_label.setText('목록 불러오는 중...')
         self._set_shared_controls_enabled(False)
