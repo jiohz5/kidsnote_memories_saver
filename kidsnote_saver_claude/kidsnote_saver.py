@@ -1,4 +1,4 @@
-import sys
+﻿import sys
 import threading
 import os
 import codecs
@@ -11,7 +11,7 @@ from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 import kidsnote_engine as manager
 
-APP_VERSION = "1.03"
+APP_VERSION = "1.04"
 UPDATE_CHECK_REPO = "jiohz5/kidsnote_memories_saver"
 
 _fault_log_file = None
@@ -61,7 +61,7 @@ if hasattr(sys.stderr, 'reconfigure'):
 # Windows에서 파이썬 스크립트 실행 시 작업표시줄 아이콘이 표시되도록 설정 (AppUserModelID 강제 지정)
 try:
     import ctypes
-    myappid = 'kidsnote.memoriessaver.v1.03'
+    myappid = 'kidsnote.memoriessaver.v1.04'
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 except Exception:
     pass
@@ -290,6 +290,16 @@ class DownloadThread(QtCore.QThread):
                     fail_cnt += 1
                     self.failed_indices.append(idx)
 
+                # 사진/동영상(또는 PDF)이 하나도 저장되지 않아 빈 날짜 폴더가 남았다면 제거해
+                # 탐색기에서 헷갈리지 않게 한다. 같은 날짜의 다른 글이 이미 저장했다면 폴더는 유지됨.
+                if not self.is_single_folder:
+                    date_dir = os.path.join(base_target_dir, clean_date)
+                    try:
+                        if os.path.isdir(date_dir) and not os.listdir(date_dir):
+                            os.rmdir(date_dir)
+                    except OSError:
+                        pass
+
                 self.progress_signal.emit(int(((count + 1) / total) * 100))
 
             if not self.is_stopped:
@@ -299,6 +309,14 @@ class DownloadThread(QtCore.QThread):
             write_app_log("Download thread failed:\n" + traceback.format_exc())
             self.status_signal.emit("다운로드 중 치명적 오류가 발생했습니다. 로그를 확인해 주세요.")
         finally:
+            # 저장물이 하나도 없어 비어버린 유형 폴더(예: 홍길동_알림장)도 정리
+            try:
+                for entry in os.listdir(self.target_dir):
+                    sub = os.path.join(self.target_dir, entry)
+                    if os.path.isdir(sub) and not os.listdir(sub):
+                        os.rmdir(sub)
+            except OSError:
+                pass
             self.elapsed_sec = int(time.time() - started_at)
             write_app_log(f"Download thread finished. success={success_cnt} fail={fail_cnt} stopped={self.is_stopped} elapsed={self.elapsed_sec}s")
             self.finished_signal.emit(self.target_dir, success_cnt, fail_cnt, self.is_stopped)
@@ -384,7 +402,7 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.ui_call_signal.emit(callback)
 
     def init_ui(self):
-        self.setWindowTitle('Kidsnote Memories Saver V1.03')
+        self.setWindowTitle('Kidsnote Memories Saver V1.04')
         
         # 사용자의 화면 해상도를 인식하여 기본 스케일 값 도출 (FHD, QHD 등 대응)
         screen = QtWidgets.QApplication.primaryScreen()

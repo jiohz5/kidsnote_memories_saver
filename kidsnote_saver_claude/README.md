@@ -1,4 +1,4 @@
-﻿# 🧒 Kidsnote Memories Saver (키즈노트 추억 저장기) V1.03
+﻿# 🧒 Kidsnote Memories Saver (키즈노트 추억 저장기) V1.04
 
 > 키즈노트(kidsnote.com)에 올라온 우리 아이의 소중한 추억(알림장, 앨범)을 한 번에 내 컴퓨터로 다운로드할 수 있는 윈도우용 프로그램입니다.
 
@@ -9,7 +9,7 @@
 
 ---
 
-## ✨ 주요 기능 (V1.03)
+## ✨ 주요 기능 (V1.04)
 
 - 🚀 **완벽한 오프라인 구동 (New!)** — 사내망/방화벽 환경에서도 차단 없이 무조건 실행되도록 Edge WebDriver를 프로그램 내부에 완전히 내장했습니다.
 - 🖥️ **4K 고해상도 완벽 지원 (New!)** — High DPI 자동 스케일링을 지원하여 4K 모니터에서도 UI와 글씨가 작아지지 않고 선명하게 보입니다.
@@ -25,8 +25,8 @@
 
 ### 방법 1: 배포용 zip 다운로드 후 바로 실행 (추천 — 100% 무설치!)
 
-1. GitHub의 [Releases](../../releases) 페이지에서 최신 **`Kidsnote_Release_V1.03.zip`** 파일을 다운로드합니다.
-2. 압축을 풀면 `Kidsnote_Memories_Saver_V1.03` 폴더가 나옵니다. 폴더 안의 **`Kidsnote_Memories_Saver_V1.03.exe`** 를 더블클릭하여 실행합니다. (폴더 안의 다른 파일들은 프로그램 구동용이니 지우지 마세요.)
+1. GitHub의 [Releases](../../releases) 페이지에서 최신 **`Kidsnote_Release_V1.04.zip`** 파일을 다운로드합니다.
+2. 압축을 풀면 `Kidsnote_Memories_Saver_V1.04` 폴더가 나옵니다. 폴더 안의 **`Kidsnote_Memories_Saver_V1.04.exe`** 를 더블클릭하여 실행합니다. (폴더 안의 다른 파일들은 프로그램 구동용이니 지우지 마세요.)
 3. **Microsoft Edge 브라우저**만 사용자의 윈도우 PC에 설치되어 있으면 끝입니다! (별도의 프로그램이나 드라이버 설치가 절대 필요 없습니다.)
 
 > [!NOTE]
@@ -67,7 +67,7 @@ python kidsnote_saver.py
 
 ### 2. GitHub Releases 메뉴에 업로드할 파일 (배포용):
 GitHub 저장소 우측의 **"Releases" -> "Draft a new release"** 메뉴를 통해 버전을 발행하실 때, 아래 1개의 바이너리 파일만 첨부(Upload) 하시면 됩니다.
-- 🎯 **`Kidsnote_Release_V1.03.zip`** (빌드 스크립트가 자동으로 만들어준 100% 무설치 완성본입니다.)
+- 🎯 **`Kidsnote_Release_V1.04.zip`** (빌드 스크립트가 자동으로 만들어준 100% 무설치 완성본입니다.)
 
 빌드는 `build_release_v1.bat` 실행 한 번이면 됩니다 (기본: 폴더 배포 방식 onedir).
 단일 exe가 꼭 필요하면 `build_release_v1.bat onefile`로 빌드할 수 있지만,
