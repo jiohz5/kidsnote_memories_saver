@@ -1963,10 +1963,22 @@ class KidsnoteApp(QtWidgets.QWidget):
             self.update_status(
                 f"[KN-DIAG] 조회0건 | nav_failed={info.get('nav_failed', False)} "
                 f"list_loaded={info.get('list_loaded', False)} items_seen={info.get('items_seen', 0)} "
-                f"filtered_out={info.get('filtered_out', 0)} timeout={info.get('timeout', False)} 기간={period_text}"
+                f"filtered_out={info.get('filtered_out', 0)} timeout={info.get('timeout', False)} "
+                f"app_error={info.get('app_error', False)} 기간={period_text}"
             )
 
-            if info.get('filtered_out', 0) > 0:
+            if info.get('app_error'):
+                # 키즈노트 웹사이트 자체가 내부 오류("아이쿠! 에러가 발생했습니다")로 죽은 경우.
+                # 우리 프로그램/네트워크 문제가 아니라 키즈노트 서버·SPA 쪽 일시 장애이므로 구분해서 안내한다.
+                msg = (
+                    "키즈노트 웹사이트 자체에서 오류 화면(\"아이쿠! 에러가 발생했습니다\")이 발생해\n"
+                    "목록을 불러오지 못했습니다. 자동으로 화면을 새로 고쳐 재시도했지만 계속 실패했습니다.\n\n"
+                    "이는 저희 프로그램이 아닌 키즈노트 웹사이트 자체의 일시적인 오류일 가능성이 높습니다.\n"
+                    "잠시 후 [목록 불러오기]를 다시 시도해 주세요."
+                )
+                self.update_status("조회 실패: 키즈노트 웹사이트 자체 오류")
+                self._show_top_message(QtWidgets.QMessageBox.Warning, "키즈노트 자체 오류", msg)
+            elif info.get('filtered_out', 0) > 0:
                 # 목록은 정상적으로 열렸고 게시물도 있었지만, 전부 조회 기간 범위 밖
                 msg = (
                     f"목록은 정상적으로 확인했습니다.\n\n"

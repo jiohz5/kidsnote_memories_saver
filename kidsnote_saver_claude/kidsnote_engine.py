@@ -157,6 +157,19 @@ def wait_css(driver, selector, timeout=10, poll=0.2):
         return False
 
 
+def _detect_kidsnote_app_error(driver):
+    """키즈노트 SPA 자체가 죽어서 뜨는 에러 바운더리 화면("아이쿠! 에러가 발생했습니다")인지 감지.
+
+    사내망 등에서 조회 도중 SPA가 내부 예외로 크래시하면 목록 대신 이 화면이 뜨는데,
+    겉보기엔 '목록이 안 뜬다'는 점에서 단순 네트워크 타임아웃과 구분이 안 돼 원인 파악이 어려웠다.
+    """
+    try:
+        text = driver.execute_script("return document.body ? document.body.innerText : '';") or ""
+        return "아이쿠" in text
+    except Exception:
+        return False
+
+
 def normalize_media_url(driver, url):
     """Browser에서 보이는 이미지/동영상 URL을 requests가 받을 수 있는 절대 URL로 정리합니다."""
     if not url:
@@ -242,55 +255,72 @@ def _browser_fetch_media(driver, url, timeout=60):
     로그인 세션 그대로 fetch → blob → base64로 꺼내온다.
     반환: (bytes 또는 None, 상태 문자열)
     """
-    js = """
-        var url = arguments[0];
-        var done = arguments[arguments.length - 1];
-        try {
-            var ctrl = new AbortController();
-            setTimeout(function(){ ctrl.abort(); }, %d);
-            fetch(url, {credentials: 'include', signal: ctrl.signal}).then(function(r){
-                if (!r.ok) { done('ERR:HTTP_' + r.status); return null; }
-                return r.blob();
-            }).then(function(b){
-                if (!b) { return; }
-                var fr = new FileReader();
-                fr.onload = function(){
-                    window.__kn_media_b64 = String(fr.result).split(',')[1] || '';
-                    done('OK:' + window.__kn_media_b64.length);
-                };
-                fr.onerror = function(){ done('ERR:READ'); };
-                fr.readAsDataURL(b);
-            }).catch(function(e){ done('ERR:' + (e && e.name ? e.name : 'FETCH')); });
-        } catch (e) {
-            done('ERR:' + e);
-        }
-    """ % max(int((timeout - 5) * 1000), 5000)
-    try:
-        driver.set_script_timeout(timeout)
-        result = driver.execute_async_script(js, url)
-        if not (isinstance(result, str) and result.startswith('OK:')):
-            return None, str(result or 'ERR:UNKNOWN')
-        total_len = int(result[3:])
-        if total_len <= 0:
-            return None, 'ERR:EMPTY'
-        # 대용량 base64를 한 번에 반환하면 드라이버가 불안정해질 수 있어 4MB씩 분할 수신
-        chunks = []
-        chunk_size = 4 * 1024 * 1024
-        for offset in range(0, total_len, chunk_size):
-            part = driver.execute_script(
-                "return (window.__kn_media_b64 || '').substring(arguments[0], arguments[1]);",
-                offset, offset + chunk_size)
-            chunks.append(part or '')
-        driver.execute_script("window.__kn_media_b64 = null;")
-        data = base64.b64decode(''.join(chunks))
-        return (data, 'OK') if data else (None, 'ERR:DECODE')
-    except Exception as e:
-        return None, f'ERR:{type(e).__name__}'
-    finally:
+    def _do_fetch(with_credentials):
+        js = """
+            var url = arguments[0];
+            var withCreds = arguments[1];
+            var done = arguments[arguments.length - 1];
+            try {
+                var ctrl = new AbortController();
+                setTimeout(function(){ ctrl.abort(); }, %d);
+                fetch(url, {credentials: withCreds ? 'include' : 'omit', signal: ctrl.signal}).then(function(r){
+                    if (!r.ok) { done('ERR:HTTP_' + r.status); return null; }
+                    return r.blob();
+                }).then(function(b){
+                    if (!b) { return; }
+                    var fr = new FileReader();
+                    fr.onload = function(){
+                        window.__kn_media_b64 = String(fr.result).split(',')[1] || '';
+                        done('OK:' + window.__kn_media_b64.length);
+                    };
+                    fr.onerror = function(){ done('ERR:READ'); };
+                    fr.readAsDataURL(b);
+                }).catch(function(e){
+                    var name = e && e.name ? e.name : 'FETCH';
+                    var detail = e && e.message ? (':' + e.message).slice(0, 120) : '';
+                    done('ERR:' + name + detail);
+                });
+            } catch (e) {
+                done('ERR:' + e);
+            }
+        """ % max(int((timeout - 5) * 1000), 5000)
         try:
-            driver.set_script_timeout(30)
-        except Exception:
-            pass
+            driver.set_script_timeout(timeout)
+            result = driver.execute_async_script(js, url, with_credentials)
+            if not (isinstance(result, str) and result.startswith('OK:')):
+                return None, str(result or 'ERR:UNKNOWN')
+            total_len = int(result[3:])
+            if total_len <= 0:
+                return None, 'ERR:EMPTY'
+            # 대용량 base64를 한 번에 반환하면 드라이버가 불안정해질 수 있어 4MB씩 분할 수신
+            chunks = []
+            chunk_size = 4 * 1024 * 1024
+            for offset in range(0, total_len, chunk_size):
+                part = driver.execute_script(
+                    "return (window.__kn_media_b64 || '').substring(arguments[0], arguments[1]);",
+                    offset, offset + chunk_size)
+                chunks.append(part or '')
+            driver.execute_script("window.__kn_media_b64 = null;")
+            data = base64.b64decode(''.join(chunks))
+            return (data, 'OK') if data else (None, 'ERR:DECODE')
+        except Exception as e:
+            return None, f'ERR:{type(e).__name__}'
+        finally:
+            try:
+                driver.set_script_timeout(30)
+            except Exception:
+                pass
+
+    data, status = _do_fetch(True)
+    if data is None and status.startswith('ERR:TypeError'):
+        # credentials:'include'로 크로스오리진(미디어 CDN) 요청 시, 서버가 자격증명 포함
+        # CORS를 허용하지 않으면 브라우저가 네트워크 단계에서 응답을 차단해 TypeError만 남는다
+        # (원인 메시지가 뭉개짐). 서명된 CDN URL은 보통 쿠키가 필요 없으므로 쿠키 없이 재시도한다.
+        retry_data, retry_status = _do_fetch(False)
+        if retry_data is not None:
+            return retry_data, retry_status
+        status = f"{status}|noauth:{retry_status}"
+    return data, status
 
 
 def fetch_bytes_with_browser_session(driver, url, session=None, referer=None, timeout=60):
@@ -989,12 +1019,15 @@ def fetch_memory_list(driver, status_callback=None, item_found_callback=None, ch
         log(f"프로필 정보 획득 실패 (무시됨) - {e}")
 
     def _scrape_type_with_retry(label):
-        """한 종류(알림장/앨범)를 조회하고, 비정상적으로 0건이면 강제 새로고침 후 1회 재시도.
+        """한 종류(알림장/앨범)를 조회하고, 비정상적으로 0건이면 강제 새로고침 후 재시도.
 
         SPA 상태가 꼬여 첫 조회가 조용히 실패하는 경우('조회 못 해놓고 완료' 증상)를
         사용자가 다시 누르지 않아도 자동으로 복구한다.
+        키즈노트 웹 자체가 내부 예외로 죽어 "아이쿠! 에러가 발생했습니다" 화면이 뜨는 경우는
+        일반 타임아웃보다 한 번 더 회복을 시도할 가치가 있어 최대 시도 횟수를 3회로 둔다.
         """
-        for attempt in (1, 2):
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
             attempt_info = {}
             nav_ok = False
             before = len(memories)
@@ -1004,8 +1037,13 @@ def fetch_memory_list(driver, status_callback=None, item_found_callback=None, ch
                 _scrape_list_pages(driver, label, memories, log, item_found_callback, check_stop_callback, limit_date_str, child_name, result_info=attempt_info, end_date_str=end_date_str)
             collected = len(memories) - before
 
+            app_error = collected == 0 and _detect_kidsnote_app_error(driver)
+            if app_error:
+                log(f"[KN-DIAG] {label} 조회 중 키즈노트 웹 자체 오류 화면(\"아이쿠\" 에러)이 감지됨 (시도 {attempt}/{max_attempts})")
+
             # 비정상 0건 판단: 진입 실패 / 타임아웃 / 카드가 보였는데 전부 파싱 불가(스켈레톤)
             #   + 날짜 필터가 없는데 카드 자체가 0개(= SPA가 아직 안 뜬 것으로 의심)
+            #   + 키즈노트 자체 에러 바운더리 화면
             parse_failed = (
                 attempt_info.get('items_seen', 0) > 0
                 and attempt_info.get('filtered_out', 0) == 0
@@ -1015,11 +1053,14 @@ def fetch_memory_list(driver, status_callback=None, item_found_callback=None, ch
                 and attempt_info.get('filtered_out', 0) == 0
             )
             abnormal_empty = collected == 0 and (
-                not nav_ok or attempt_info.get('timeout') or parse_failed or no_items_unfiltered
+                not nav_ok or attempt_info.get('timeout') or parse_failed or no_items_unfiltered or app_error
             )
             stopped = bool(check_stop_callback and check_stop_callback())
-            if attempt == 1 and abnormal_empty and not stopped:
-                log(f"{label} 조회가 비정상 종료되어 화면을 새로 고친 뒤 한 번 더 시도합니다...")
+            if attempt < max_attempts and abnormal_empty and not stopped:
+                if app_error:
+                    log(f"{label} 조회 중 키즈노트 웹사이트 자체 오류가 발생하여 화면을 새로 고친 뒤 다시 시도합니다...")
+                else:
+                    log(f"{label} 조회가 비정상 종료되어 화면을 새로 고친 뒤 한 번 더 시도합니다...")
                 driver.get("https://www.kidsnote.com/service")
                 wait_css(driver, "span[role='img']", timeout=10)
                 continue
@@ -1027,6 +1068,8 @@ def fetch_memory_list(driver, status_callback=None, item_found_callback=None, ch
             # 마지막 시도의 진단 정보만 최종 info에 반영 (재시도 성공 시 첫 실패 흔적은 제거)
             if not nav_ok:
                 info['nav_failed'] = True
+            if app_error:
+                info['app_error'] = True
             for key, value in attempt_info.items():
                 if isinstance(value, bool):
                     info[key] = info.get(key) or value
