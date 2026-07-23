@@ -320,7 +320,102 @@ def _browser_fetch_media(driver, url, timeout=60):
         if retry_data is not None:
             return retry_data, retry_status
         status = f"{status}|noauth:{retry_status}"
+        if retry_status.startswith('ERR:TypeError'):
+            # credentials 유무와 무관하게 둘 다 TypeError라면 CORS 자격증명 정책 문제가 아니라
+            # CDN이 CORS 헤더 자체를 아예 내려주지 않는 경우일 가능성이 높다. no-cors 프로브로
+            # '네트워크는 도달하지만 CORS만 없는 것'과 '네트워크 자체가 막힌 것'을 구분해 남긴다.
+            status = f"{status}|probe:{_probe_no_cors_reachable(driver, url)}"
     return data, status
+
+
+def _probe_no_cors_reachable(driver, url, timeout=15):
+    """no-cors 모드 fetch로 CORS 헤더 부재와 순수 네트워크 차단을 구분하는 진단 프로브.
+
+    no-cors 요청은 응답에 CORS 헤더가 없어도 브라우저가 막지 않는다(응답 '내용'을 못 읽을 뿐).
+    이게 성공하면(opaque 응답 수신) 네트워크 자체는 뚫려 있고 CORS 헤더가 없어서 fetch로 못
+    받는 것 → CDP 경유 우회가 유효한 케이스. 이마저 실패하면 사내망 차단/URL 만료 등
+    네트워크 단계에서부터 막힌 것으로 봐야 한다.
+    """
+    js = """
+        var url = arguments[0];
+        var done = arguments[arguments.length - 1];
+        var ctrl = new AbortController();
+        setTimeout(function(){ ctrl.abort(); }, %d);
+        fetch(url, {mode: 'no-cors', credentials: 'omit', signal: ctrl.signal}).then(function(r){
+            done('reachable(type=' + r.type + ',status=' + r.status + ')');
+        }).catch(function(e){
+            var name = e && e.name ? e.name : 'FETCH';
+            var detail = e && e.message ? (':' + e.message).slice(0, 80) : '';
+            done('unreachable(' + name + detail + ')');
+        });
+    """ % max(int((timeout - 2) * 1000), 3000)
+    try:
+        driver.set_script_timeout(timeout)
+        return driver.execute_async_script(js, url) or 'UNKNOWN'
+    except Exception as e:
+        return f'PROBE_ERR:{type(e).__name__}'
+    finally:
+        try:
+            driver.set_script_timeout(30)
+        except Exception:
+            pass
+
+
+def _cdp_fetch_media(driver, url):
+    """CDP(DevTools Protocol)로 미디어를 CORS 제약 없이 원본 바이트로 받는다.
+
+    fetch()/XHR은 브라우저의 동일-출처 정책을 반드시 지키므로, CDN이 CORS 헤더를 아예
+    내려주지 않으면 credentials 유무와 무관하게 항상 'TypeError: Failed to fetch'로 막힌다
+    (실제로 사내망 등에서 관측된 실패 패턴). Network.loadNetworkResource는 페이지 JS가 아니라
+    디버깅 프로토콜로 브라우저 네트워크 스택에 직접 접근하므로 이 제약을 받지 않는다.
+    Selenium의 Chromium 계열(Edge 포함) execute_cdp_cmd로 호출 가능.
+    반환: (bytes 또는 None, 상태 문자열)
+    """
+    try:
+        frame_tree = driver.execute_cdp_cmd('Page.getFrameTree', {})
+        frame_id = frame_tree['frameTree']['frame']['id']
+    except Exception as e:
+        return None, f'ERR:CDP_FRAME_{type(e).__name__}'
+
+    try:
+        result = driver.execute_cdp_cmd('Network.loadNetworkResource', {
+            'frameId': frame_id,
+            'url': url,
+            'options': {'disableCache': False, 'includeCredentials': True},
+        })
+    except Exception as e:
+        # 구형 Edge/드라이버가 이 CDP 명령을 지원하지 않는 경우 (정상적인 폴백 대상)
+        return None, f'ERR:CDP_UNSUPPORTED_{type(e).__name__}'
+
+    resource = (result or {}).get('resource') or {}
+    http_status = resource.get('httpStatusCode')
+    if not resource.get('success'):
+        net_err = resource.get('netErrorName') or resource.get('netError') or 'UNKNOWN'
+        suffix = f'_HTTP{http_status}' if http_status else ''
+        return None, f'ERR:CDP_{net_err}{suffix}'
+
+    stream = resource.get('stream')
+    if not stream:
+        return None, 'ERR:CDP_NO_STREAM'
+
+    chunks = []
+    try:
+        while True:
+            chunk = driver.execute_cdp_cmd('IO.read', {'handle': stream, 'size': 4 * 1024 * 1024})
+            piece = chunk.get('data', '') or ''
+            chunks.append(base64.b64decode(piece) if chunk.get('base64Encoded') else piece.encode('utf-8', 'ignore'))
+            if chunk.get('eof'):
+                break
+        driver.execute_cdp_cmd('IO.close', {'handle': stream})
+    except Exception as e:
+        return None, f'ERR:CDP_READ_{type(e).__name__}'
+
+    body = b''.join(chunks)
+    if http_status and int(http_status) >= 400:
+        return None, f'ERR:CDP_HTTP_{http_status}'
+    if not body:
+        return None, 'ERR:CDP_EMPTY'
+    return body, 'OK'
 
 
 def fetch_bytes_with_browser_session(driver, url, session=None, referer=None, timeout=60):
@@ -1385,6 +1480,7 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
 
         count = 0
         failed_count = 0
+        cdp_fallback_used = False
         browser_fallback_used = False
         capture_fallback_used = False
         fail_reasons = []  # [KN-DIAG] 요약용 실패 사유 모음
@@ -1437,7 +1533,30 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
                         log("다운로드가 중지되었습니다.")
                         return False
 
-            # 2차: 브라우저 경유 다운로드 — 프록시 차단 환경에서도 브라우저 네트워크는 살아 있음
+            # 2차: CDP(DevTools Protocol) 경유 다운로드 — fetch()와 달리 CORS 제약을 받지 않아
+            # CDN이 CORS 헤더를 아예 안 내려주는 경우(= 3차 browser fetch도 항상 실패하는 근본 원인)의
+            # 진짜 대안이 된다.
+            if not saved:
+                media_bytes, status = _cdp_fetch_media(driver, src)
+                if _stop_requested(check_stop_callback):
+                    log("다운로드가 중지되었습니다.")
+                    return False
+                if media_bytes:
+                    try:
+                        ext = _extension_from_response(src, "")
+                        file_path = os.path.join(target_dir, f"{prefix_str}_{count+1}.{ext}")
+                        with open(file_path, "wb") as f:
+                            f.write(media_bytes)
+                        _apply_post_timestamp(file_path, post_info)
+                        count += 1
+                        saved = True
+                        cdp_fallback_used = True
+                    except Exception as write_e:
+                        fail_status += f" cdp:write_{type(write_e).__name__}"
+                else:
+                    fail_status += f" cdp:{status}"
+
+            # 3차: 브라우저 fetch() 경유 다운로드 — CDN이 CORS를 정상 지원하는 환경에서 유효
             if not saved:
                 media_bytes, status = _browser_fetch_media(driver, src)
                 if _stop_requested(check_stop_callback):
@@ -1465,11 +1584,11 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
                     fail_reasons.append(reason)
                 log(f"DEBUG: 미디어 다운로드 실패 ({reason})")
 
-        # 3차(최후): 직접·브라우저 fetch가 모두 막힌 경우(프록시가 이미지 CDN 완전 차단 등)
+        # 4차(최후): 직접·CDP·브라우저 fetch가 모두 막힌 경우(프록시가 이미지 CDN 완전 차단 등)
         # 화면에 이미 보이는 이미지를 캡처해서라도 저장한다. 화질은 표시 해상도 수준.
         # media_srcs가 있을 때만(= 받을 사진이 있었는데 전부 실패) 캡처 — 텍스트 전용 글은 제외.
         if count == 0 and media_srcs and large_img_elements:
-            log("직접·브라우저 다운로드가 모두 막혀 화면 캡처 방식으로 저장을 시도합니다...")
+            log("직접·CDP·브라우저 다운로드가 모두 막혀 화면 캡처 방식으로 저장을 시도합니다...")
             # 실제 미디어 개수만큼만 캡처 (UI 이미지 과잉 저장 방지)
             for _img in large_img_elements[:len(media_srcs)]:
                 if _stop_requested(check_stop_callback):
@@ -1493,6 +1612,8 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
                 except Exception:
                     continue
 
+        if cdp_fallback_used:
+            log("직접 접근이 차단되어 일부/전체 파일을 CDP(디버깅 프로토콜) 경유 방식으로 받았습니다.")
         if browser_fallback_used:
             log("직접 접근이 차단되어 일부/전체 파일을 브라우저 경유 방식으로 받았습니다.")
         if capture_fallback_used:
@@ -1501,7 +1622,7 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
         # 진단 요약(사용자 복사용): 실패가 있었을 때만 대표 사유를 한 줄로 남긴다
         if failed_count or (count == 0 and media_srcs):
             reason_str = "; ".join(sorted(set(fail_reasons))[:4]) or "사유미상"
-            method = "캡처" if capture_fallback_used else ("브라우저" if browser_fallback_used else "직접")
+            method = "캡처" if capture_fallback_used else ("브라우저" if browser_fallback_used else ("CDP" if cdp_fallback_used else "직접"))
             log(f"[KN-DIAG] 미디어 실패 | 총{len(media_srcs)} 성공{count}({method}) 실패{failed_count} | 사유={reason_str}")
 
         log(f"{post_info['title']}: {count}개의 파일(사진/동영상) 다운로드 완료.")
