@@ -11,7 +11,7 @@ from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 import kidsnote_engine as manager
 
-APP_VERSION = "1.04"
+APP_VERSION = "1.05"
 UPDATE_CHECK_REPO = "jiohz5/kidsnote_memories_saver"
 
 _fault_log_file = None
@@ -61,7 +61,7 @@ if hasattr(sys.stderr, 'reconfigure'):
 # Windows에서 파이썬 스크립트 실행 시 작업표시줄 아이콘이 표시되도록 설정 (AppUserModelID 강제 지정)
 try:
     import ctypes
-    myappid = 'kidsnote.memoriessaver.v1.04'
+    myappid = 'kidsnote.memoriessaver.v1.05'
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 except Exception:
     pass
@@ -131,13 +131,17 @@ class DownloadThread(QtCore.QThread):
     progress_signal = QtCore.pyqtSignal(int)
     finished_signal = QtCore.pyqtSignal(str, int, int, bool)
 
-    def __init__(self, driver, memories, indices, target_dir, is_pdf, is_single_folder, profile_name="알수없음", is_overwrite_allow=True, include_video=True):
+    def __init__(self, driver, memories, indices, target_dir, is_pdf, is_single_folder, profile_name="알수없음", is_overwrite_allow=True, include_video=True, is_both=False):
         super().__init__()
         self.driver = driver
         self.memories = memories
         self.indices = indices
         self.target_dir = target_dir
         self.is_pdf = is_pdf
+        self.is_both = is_both
+        # 한 항목에서 무엇을 저장할지 (PDF+사진 모드면 둘 다 True)
+        self.want_pdf = is_pdf or is_both
+        self.want_media = (not is_pdf) or is_both
         self.is_single_folder = is_single_folder
         self.profile_name = profile_name
         self.is_overwrite_allow = is_overwrite_allow
@@ -171,11 +175,11 @@ class DownloadThread(QtCore.QThread):
         fail_cnt = 0
         started_at = time.time()
         try:
-            write_app_log(f"Download thread started. selected={len(self.indices)} pdf={self.is_pdf} single_folder={self.is_single_folder}")
+            write_app_log(f"Download thread started. selected={len(self.indices)} pdf={self.is_pdf} both={self.is_both} single_folder={self.is_single_folder}")
 
             # 사진 모드는 requests 직접 접근이 필요하므로 시작 전에 접근 가능 여부를 점검.
-            # (PDF 모드는 브라우저 CDP로 저장하므로 점검 불필요)
-            if not self.is_pdf:
+            # (PDF 전용 모드는 브라우저 CDP로 저장하므로 점검 불필요)
+            if self.want_media:
                 self.status_signal.emit("네트워크 직접 접근 사전 점검 중...")
                 if not manager.probe_direct_access(self.driver):
                     self.network_blocked = True
@@ -222,7 +226,11 @@ class DownloadThread(QtCore.QThread):
                     date_type_counts[dt_key] = post_index + 1
                     mem['post_index'] = post_index
 
-                    if self.is_pdf:
+                    # PDF와 사진/동영상을 각각 독립적으로 저장한다.
+                    # (둘 다 받는 모드에서는 같은 항목에 대해 두 번 호출되며, 저장 위치는 동일 폴더)
+                    step_results = []
+
+                    if self.want_pdf:
                         date_prefix = clean_date
                         dt_match_dot = re.search(r'(\d{4})\.?\s*(\d{1,2})\.?\s*(\d{1,2})', clean_date)
                         dt_match_kor = re.search(r'(?:(\d{4})\s*년)?\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일', clean_date)
@@ -252,31 +260,35 @@ class DownloadThread(QtCore.QThread):
                             os.makedirs(date_dir, exist_ok=True)
                             path = os.path.join(date_dir, filename)
 
-                        success = manager.download_item(
+                        step_results.append(manager.download_item(
                             self.driver,
                             mem,
                             path,
-                            self.is_pdf,
+                            True,
                             self.status_signal.emit,
                             self.is_overwrite_allow,
                             self.check_stopped,
                             self.include_video,
                             self.network_blocked,
-                        )
-                    else:
+                        ))
+
+                    if self.want_media and not self.is_stopped:
                         post_dir = base_target_dir if self.is_single_folder else os.path.join(base_target_dir, clean_date)
                         os.makedirs(post_dir, exist_ok=True)
-                        success = manager.download_item(
+                        step_results.append(manager.download_item(
                             self.driver,
                             mem,
                             post_dir,
-                            self.is_pdf,
+                            False,
                             self.status_signal.emit,
                             self.is_overwrite_allow,
                             self.check_stopped,
                             self.include_video,
                             self.network_blocked,
-                        )
+                        ))
+
+                    # 하나라도 실패하면 실패로 본다 (성공으로 위장하지 않는다)
+                    success = bool(step_results) and all(step_results)
 
                     if success:
                         success_cnt += 1
@@ -402,7 +414,7 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.ui_call_signal.emit(callback)
 
     def init_ui(self):
-        self.setWindowTitle('Kidsnote Memories Saver V1.04')
+        self.setWindowTitle('Kidsnote Memories Saver V1.05')
         
         # 사용자의 화면 해상도를 인식하여 기본 스케일 값 도출 (FHD, QHD 등 대응)
         screen = QtWidgets.QApplication.primaryScreen()
@@ -896,10 +908,14 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.pdf_radio = QtWidgets.QRadioButton("전체 페이지 PDF 저장")
         self.pdf_radio.setChecked(True)
         self.photo_radio = QtWidgets.QRadioButton("사진+동영상만 받기")
+        self.both_radio = QtWidgets.QRadioButton("PDF+사진+동영상 모두")
+        self.both_radio.setToolTip("한 게시물에서 PDF와 사진/동영상을 모두 같은 폴더에 저장합니다 (시간이 더 걸립니다)")
         self.filetype_btn_group.addButton(self.pdf_radio)
         self.filetype_btn_group.addButton(self.photo_radio)
+        self.filetype_btn_group.addButton(self.both_radio)
         radio_layout.addWidget(self.pdf_radio)
         radio_layout.addWidget(self.photo_radio)
+        radio_layout.addWidget(self.both_radio)
         self.chk_exclude_video = QtWidgets.QCheckBox("동영상 제외")
         self.chk_exclude_video.setToolTip("체크하면 사진만 받고 동영상은 건너뜁니다 (용량 절약)")
         radio_layout.addWidget(self.chk_exclude_video)
@@ -2057,6 +2073,7 @@ class KidsnoteApp(QtWidgets.QWidget):
         target_dir = self.dir_input.text()
         self.stop_flag = False
         is_pdf = self.pdf_radio.isChecked()
+        is_both = self.both_radio.isChecked()
         is_single_folder = self.folder_single_radio.isChecked()
         include_video = not self.chk_exclude_video.isChecked()
 
@@ -2085,7 +2102,7 @@ class KidsnoteApp(QtWidgets.QWidget):
 
         write_app_log(
             f"Starting download thread. selected={len(selected_indices)} "
-            f"pdf={is_pdf} single_folder={is_single_folder}"
+            f"pdf={is_pdf} both={is_both} single_folder={is_single_folder}"
         )
         self.download_thread = DownloadThread(
             self.driver,
@@ -2097,6 +2114,7 @@ class KidsnoteApp(QtWidgets.QWidget):
             profile_name,
             is_overwrite_allow,
             include_video,
+            is_both,
         )
         self.download_thread.status_signal.connect(self.update_status)
         self.download_thread.progress_signal.connect(self.update_progress)

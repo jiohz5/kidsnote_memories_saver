@@ -157,17 +157,46 @@ def wait_css(driver, selector, timeout=10, poll=0.2):
         return False
 
 
+# 키즈노트 웹 자체가 정상 목록 대신 뜨우는 에러 화면 문구들.
+# "아이쿠! 에러가 발생했습니다"(SPA 크래시 바운더리) 외에,
+# 실사용 중 관측된 "오류가 발생하였습니다"(별도 오류 토스트/배너로 추정)도 함께 감지한다.
+_KIDSNOTE_APP_ERROR_MARKERS = ("아이쿠", "오류가 발생하였습니다", "오류가 발생했습니다")
+
+
 def _detect_kidsnote_app_error(driver):
-    """키즈노트 SPA 자체가 죽어서 뜨는 에러 바운더리 화면("아이쿠! 에러가 발생했습니다")인지 감지.
+    """키즈노트 웹 자체의 에러 화면(SPA 크래시 바운더리 등)인지 감지.
 
     사내망 등에서 조회 도중 SPA가 내부 예외로 크래시하면 목록 대신 이 화면이 뜨는데,
     겉보기엔 '목록이 안 뜬다'는 점에서 단순 네트워크 타임아웃과 구분이 안 돼 원인 파악이 어려웠다.
     """
     try:
         text = driver.execute_script("return document.body ? document.body.innerText : '';") or ""
-        return "아이쿠" in text
+        return any(marker in text for marker in _KIDSNOTE_APP_ERROR_MARKERS)
     except Exception:
         return False
+
+
+def _wait_for_list_or_app_error(driver, timeout=30, poll=0.25):
+    """게시물 목록 요소가 뜨거나 키즈노트 자체 에러 화면이 뜨는 즉시(둘 중 먼저 오는 쪽) 반환.
+
+    기존에는 목록 요소만 고정 타임아웃(최대 30초)으로 기다렸기 때문에, 목록 대신 에러 화면이
+    떠 있어도 그 사실을 30초 내내 모르고 있다가 타임아웃이 지나서야 재시도로 넘어갔다
+    ('감지 후 새로고침까지 너무 느리다' 피드백의 원인). 매 poll마다 에러 문구도 함께 확인해
+    에러가 뜨면 타임아웃을 기다리지 않고 즉시 재시도로 넘어갈 수 있게 한다.
+    반환: 'items' | 'error' | 'timeout'
+    """
+    items_xpath = "//div[contains(@class, 'exa4ze60') or contains(@class, 'css-220836')]"
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if driver.find_elements(By.XPATH, items_xpath):
+                return 'items'
+        except Exception:
+            pass
+        if _detect_kidsnote_app_error(driver):
+            return 'error'
+        time.sleep(poll)
+    return 'timeout'
 
 
 def normalize_media_url(driver, url):
@@ -678,13 +707,15 @@ def _scrape_list_pages(driver, item_type, memories, log, item_found_callback=Non
             log(f"DEBUG: {item_type} 수집 중지 요청 확인됨.")
             break
 
-        try:
-            # Wait for items to load
-            log(f"DEBUG: {page_count}페이지 로딩 대기 중 (최대 15초)...")
-            WebDriverWait(driver, 30).until(
-                EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'exa4ze60') or contains(@class, 'css-220836')]"))
-            )
-        except TimeoutException:
+        # Wait for items to load (에러 화면이 뜨면 타임아웃을 기다리지 않고 즉시 빠져나옴)
+        log(f"DEBUG: {page_count}페이지 로딩 대기 중 (최대 30초)...")
+        wait_outcome = _wait_for_list_or_app_error(driver, timeout=30)
+        if wait_outcome == 'error':
+            log(f"DEBUG: {item_type} {page_count}페이지에서 키즈노트 자체 오류 화면 감지됨 (대기 중단).")
+            info['app_error'] = True
+            info['timeout'] = True
+            break
+        if wait_outcome == 'timeout':
             log(f"DEBUG: TimeoutException 발생. 현재 URL: {driver.current_url}")
             log(f"{item_type} {page_count}페이지 게시물을 찾을 수 없습니다.")
             info['timeout'] = True
@@ -991,17 +1022,16 @@ def navigate_to_memory_view(driver, item_type_label, log_func, target_child=None
             log_func(f"전체보기 버튼 클릭 실패: {e}")
             return False
 
-        # 목록 항목 대기
-        try:
-            # 아래 WebDriverWait가 게시물 감지 즉시 통과하므로 고정 안정화는 최소화
-            time.sleep(0.3)
-            WebDriverWait(driver, 30).until(
-                EC.presence_of_element_located((By.XPATH, "//div[contains(@class,'exa4ze60') or contains(@class,'css-220836')]"))
-            )
+        # 목록 항목 대기 (에러 화면이 뜨면 타임아웃을 기다리지 않고 즉시 빠져나옴)
+        time.sleep(0.3)  # 아래 대기가 게시물 감지 즉시 통과하므로 고정 안정화는 최소화
+        outcome = _wait_for_list_or_app_error(driver, timeout=30)
+        if outcome == 'items':
             return True
-        except TimeoutException:
-            log_func(f"{item_type_label} 목록 대기 시간 초과")
+        if outcome == 'error':
+            log_func(f"{item_type_label} 목록 대신 키즈노트 자체 오류 화면이 감지되었습니다.")
             return False
+        log_func(f"{item_type_label} 목록 대기 시간 초과")
+        return False
     except Exception as e:
         log_func(f"Memory view 진입 중 큰 예외 발생: {e}")
         return False
@@ -1132,9 +1162,9 @@ def fetch_memory_list(driver, status_callback=None, item_found_callback=None, ch
                 _scrape_list_pages(driver, label, memories, log, item_found_callback, check_stop_callback, limit_date_str, child_name, result_info=attempt_info, end_date_str=end_date_str)
             collected = len(memories) - before
 
-            app_error = collected == 0 and _detect_kidsnote_app_error(driver)
+            app_error = collected == 0 and (attempt_info.get('app_error') or _detect_kidsnote_app_error(driver))
             if app_error:
-                log(f"[KN-DIAG] {label} 조회 중 키즈노트 웹 자체 오류 화면(\"아이쿠\" 에러)이 감지됨 (시도 {attempt}/{max_attempts})")
+                log(f"[KN-DIAG] {label} 조회 중 키즈노트 웹 자체 오류 화면이 감지됨 (시도 {attempt}/{max_attempts})")
 
             # 비정상 0건 판단: 진입 실패 / 타임아웃 / 카드가 보였는데 전부 파싱 불가(스켈레톤)
             #   + 날짜 필터가 없는데 카드 자체가 0개(= SPA가 아직 안 뜬 것으로 의심)
