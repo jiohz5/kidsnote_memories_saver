@@ -36,18 +36,21 @@
 
 ## 🚀 시작하기
 
-### 1️⃣ 다운로드
+### 1️⃣ 다운로드 후 바로 실행
 
-[**Releases 페이지**](../../releases/latest)에서 최신 `Kidsnote_Release_Vx.xx.zip` 파일을 받습니다.
-
-### 2️⃣ 실행
-
-압축을 풀고 폴더 안의 **`Kidsnote_Memories_Saver_Vx.xx.exe`** 를 더블클릭하세요.
-(폴더 안의 다른 파일들은 프로그램 구동용이니 지우지 마세요.)
+[**Releases 페이지**](../../releases/latest)에서 **`Kidsnote_Memories_Saver_Vx.xx.exe`** 를 받아 더블클릭하면 끝입니다.
+설치도, 압축 해제도 필요 없습니다.
 
 > **필요한 것은 Microsoft Edge 브라우저뿐입니다.** 윈도우에 기본 설치되어 있으므로 별도 준비가 필요 없습니다.
 
-### 3️⃣ 3단계로 저장
+> [!NOTE]
+> **종료할 때 "임시폴더 삭제 실패 (Failed to remove temporary directory: ...MEI...)" 경고가 뜬다면?**
+> 회사 PC처럼 보안 프로그램이 엄격한 환경에서 가끔 발생합니다. 프로그램 동작에는 문제가 없지만,
+> 신경 쓰이신다면 같은 릴리스의 **`Kidsnote_Release_Vx.xx.zip` (폴더판)** 을 받아 압축을 풀고
+> 폴더 안의 exe를 실행하세요. 임시폴더를 사용하지 않아 경고가 뜨지 않고 시작도 더 빠릅니다.
+> (폴더 안의 다른 파일들은 구동용이니 지우지 마세요.)
+
+### 2️⃣ 3단계로 저장
 
 | 단계 | 할 일 |
 |:---:|---|
@@ -105,11 +108,17 @@ python kidsnote_saver.py
 ### 배포판 빌드
 
 ```bash
-build_release_v1.bat            # 기본: 폴더(onedir) 배포 — 시작이 빠르고 임시폴더 경고가 없음
-build_release_v1.bat onefile    # 단일 exe (시작 느림, 일부 보안 환경에서 종료 경고 가능)
+build_release_v1.bat            # 기본(both): 단일 exe + 폴더 zip 둘 다 생성
+build_release_v1.bat onefile    # 단일 exe만
+build_release_v1.bat onedir     # 폴더 zip만
 ```
 
-빌드 결과 zip 1개를 GitHub Releases에 첨부하면 배포 완료입니다.
+| 산출물 | 설명 |
+|---|---|
+| `Kidsnote_Memories_Saver_Vx.xx.exe` | 압축하지 않은 단일 실행 파일 (기본 배포물) |
+| `Kidsnote_Release_Vx.xx.zip` | 폴더(onedir) 배포판 — 임시폴더 경고 회피용 |
+
+두 파일을 GitHub Releases에 함께 첨부하면 배포 완료입니다.
 
 ### 파일 구성
 
