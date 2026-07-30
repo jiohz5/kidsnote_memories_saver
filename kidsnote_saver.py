@@ -1481,7 +1481,8 @@ class KidsnoteApp(QtWidgets.QWidget):
                             pass
                         shot_b64 = avatar_elem.screenshot_as_base64 or ""
                     except Exception as _shot_e:
-                        write_app_log(f"Profile avatar capture failed for {name}: {type(_shot_e).__name__}")
+                        # 로그에 아이 이름을 남기지 않는다 (개인정보) — 순번으로만 기록
+                        write_app_log(f"Profile avatar capture failed for child #{idx + 1}: {type(_shot_e).__name__}")
 
                     child_array.append([name, age, url, orig_url, shot_b64])
                 
@@ -2003,6 +2004,17 @@ class KidsnoteApp(QtWidgets.QWidget):
                 )
                 self.update_status(f"조회 완료: [{period_text}] 기간 내 게시물 0건")
                 self._show_top_message(QtWidgets.QMessageBox.Information, "기간 내 게시물 없음", msg)
+            elif info.get('selector_broken'):
+                # 화면에는 내용이 있는데 게시물을 하나도 인식하지 못함 → 키즈노트 화면 개편 가능성
+                msg = (
+                    "키즈노트 화면 구성이 바뀌어 게시물을 인식하지 못한 것 같습니다.\n\n"
+                    "화면에는 내용이 표시되는데 프로그램이 목록을 읽어내지 못하는 상태입니다.\n"
+                    "사용자 잘못이 아니며, 프로그램 업데이트가 필요한 경우입니다.\n\n"
+                    "GitHub 릴리스 페이지에서 새 버전이 있는지 확인해 주시고,\n"
+                    "최신 버전인데도 같은 증상이면 [🔧 진단정보 복사] 후 이슈로 남겨주시면 반영하겠습니다."
+                )
+                self.update_status("조회 실패: 키즈노트 화면 구성 변경 의심 (업데이트 필요)")
+                self._show_top_message(QtWidgets.QMessageBox.Warning, "화면 구성이 바뀐 것 같습니다", msg)
             elif info.get('list_loaded') and info.get('items_seen', 0) == 0:
                 # 목록 화면은 열렸지만 게시물 자체가 하나도 없음 (신규 계정 등)
                 msg = (
@@ -2029,7 +2041,14 @@ class KidsnoteApp(QtWidgets.QWidget):
             self._show_top_message(QtWidgets.QMessageBox.Information, "불러오기 완료", msg)
         else:
             msg = f"목록 로드 완료: {len(self.memories)}개 수집 완료"
-            self.update_status(msg)
+            # 알려진 화면 구조로는 못 찾고 예비 방식으로 찾아낸 경우 — 동작은 했지만 업데이트를 권한다
+            if (getattr(self.scrape_thread, 'result_info', None) or {}).get('selector_fallback'):
+                msg += (
+                    "\n\n※ 키즈노트 화면이 일부 바뀐 것 같아 예비 방식으로 목록을 찾았습니다.\n"
+                    "이번에는 정상 수집되었지만, 제목·날짜가 어긋나 보이면\n"
+                    "GitHub에서 새 버전을 확인해 주세요."
+                )
+            self.update_status(msg.split("\n")[0])
             self.update_progress(100)
             self._show_top_message(QtWidgets.QMessageBox.Information, "불러오기 완료", msg)
 

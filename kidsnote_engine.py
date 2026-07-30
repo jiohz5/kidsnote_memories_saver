@@ -176,6 +176,120 @@ def _detect_kidsnote_app_error(driver):
         return False
 
 
+# ── 키즈노트 화면 셀렉터 ────────────────────────────────────────────────
+# exa4ze60 / css-220836 처럼 생긴 이름은 키즈노트가 프론트엔드를 새로 배포할 때마다
+# 값이 바뀌는 자동 생성(CSS-in-JS) 클래스입니다. 어느 날 한꺼번에 깨질 수 있으므로
+#   (1) 여기 한 곳에만 적어두고 (고칠 때 이 블록만 수정)
+#   (2) 클래스로 못 찾으면 _find_post_cards()의 구조 기반 탐색이 대신 찾도록
+# 이중으로 대비합니다.
+POST_CARD_CLASSES = ("exa4ze60", "css-220836")      # 목록의 게시물 카드
+CARD_DATE_XPATH = ".//div[contains(@class, 'exa4ze65')]/div"   # 카드 안 날짜
+CARD_DATE_CLASS = "css-15xrcbi"                      # 날짜 폴백
+CARD_BODY_XPATH = ".//div[contains(@class, 'e14iqn2g4')]"      # 카드 안 본문/제목
+CARD_BODY_CLASS = "css-12g7lcb"                      # 본문 폴백
+MEMORY_MENU_CLASS = "e1q0zrbj0"                      # 사이드바 '추억보기'
+MEMORY_MENU_LINK_CLASS = "e1efjxmz8"                 # 드롭다운 '추억보기'
+ALBUM_BODY_CLASS = "css-1469k6q"                     # 앨범 상세 본문 영역
+
+
+def post_card_xpath():
+    """게시물 카드를 찾는 XPath (알려진 클래스 기준)."""
+    conds = " or ".join("contains(@class, '%s')" % c for c in POST_CARD_CLASSES)
+    return "//div[%s]" % conds
+
+
+# 클래스명이 전부 바뀌었을 때 쓰는 구조 기반 탐색.
+# '링크를 품고 있고 + 날짜 형태 텍스트를 포함하는 반복 요소'를 게시물 카드로 본다.
+_FIND_CARDS_FALLBACK_JS = r"""
+var datePat = /(\d{4}\s*[.\-년]\s*\d{1,2})|(\d{1,2}\s*월\s*\d{1,2}\s*일)/;
+/* body/nav/footer 등은 카드가 될 수 없다 (페이지 전체를 카드 하나로 오인하는 것 방지) */
+var SKIP = {BODY: 1, HTML: 1, NAV: 1, FOOTER: 1, HEADER: 1, MAIN: 1};
+var groups = {};
+var links = document.querySelectorAll('a[href]');
+for (var i = 0; i < links.length; i++) {
+  var node = links[i];
+  for (var up = 0; up < 5 && node && node.parentElement; up++) {
+    node = node.parentElement;
+    if (SKIP[node.tagName]) break;
+    var txt = node.innerText || '';
+    if (txt.length > 600) break;              /* 너무 큰 컨테이너는 카드가 아님 */
+    if (!datePat.test(txt)) continue;
+    var sig = node.tagName + '|' + (node.className || '') + '|' + up;
+    if (!groups[sig]) groups[sig] = [];
+    if (groups[sig].indexOf(node) === -1) groups[sig].push(node);  /* 중복 제거 */
+    break;
+  }
+}
+var best = [];
+for (var k in groups) {
+  var g = groups[k];
+  /* 서로를 포함하는 요소가 있으면 안쪽(개별 카드)만 남긴다 */
+  g = g.filter(function (el) {
+    return !g.some(function (other) { return other !== el && el.contains(other); });
+  });
+  if (g.length > best.length) best = g;
+}
+/* 2개 이상 반복되는 구조일 때만 신뢰한다 */
+return best.length >= 2 ? best : [];
+"""
+
+
+def _find_post_cards(driver, log=None):
+    """게시물 카드 목록을 반환. (요소목록, 폴백사용여부)
+
+    1순위: 알려진 클래스명. 2순위: 구조 기반 탐색(클래스명이 전부 바뀐 경우).
+    """
+    try:
+        cards = driver.find_elements(By.XPATH, post_card_xpath())
+        if cards:
+            return cards, False
+    except Exception:
+        pass
+
+    try:
+        cards = driver.execute_script(_FIND_CARDS_FALLBACK_JS) or []
+        if cards:
+            if log:
+                log("[KN-DIAG] 카드 탐색: 클래스 실패 → 구조 기반 폴백으로 %d개 발견" % len(cards))
+            return cards, True
+    except Exception as e:
+        if log:
+            log("DEBUG: 구조 기반 카드 탐색 실패 - %s" % type(e).__name__)
+    return [], False
+
+
+_DATE_LIKE_RE = re.compile(r'(\d{4}\s*[.\-년]\s*\d{1,2}\s*[.\-월]?\s*\d{0,2})|(\d{1,2}\s*월\s*\d{1,2}\s*일)')
+
+
+def _card_lines(card):
+    """카드의 텍스트를 줄 단위로 반환 (실패 시 빈 리스트)."""
+    try:
+        return [ln.strip() for ln in (card.text or "").split("\n") if ln.strip()]
+    except Exception:
+        return []
+
+
+def _first_date_like_line(card):
+    """카드 텍스트에서 날짜 형태의 줄을 찾아 반환 (클래스명이 바뀌었을 때의 폴백)."""
+    for line in _card_lines(card):
+        if _DATE_LIKE_RE.search(line):
+            return line
+    return ""
+
+
+def _longest_content_line(card):
+    """카드 텍스트에서 날짜/작성자 줄을 제외한 가장 긴 줄을 본문으로 간주 (폴백)."""
+    best = ""
+    for line in _card_lines(card):
+        if _DATE_LIKE_RE.search(line):
+            continue
+        if len(line) <= 25 and any(k in line for k in _WRITER_KEYWORDS):
+            continue
+        if len(line) > len(best):
+            best = line
+    return best[:35]
+
+
 def _wait_for_list_or_app_error(driver, timeout=30, poll=0.25):
     """게시물 목록 요소가 뜨거나 키즈노트 자체 에러 화면이 뜨는 즉시(둘 중 먼저 오는 쪽) 반환.
 
@@ -185,7 +299,7 @@ def _wait_for_list_or_app_error(driver, timeout=30, poll=0.25):
     에러가 뜨면 타임아웃을 기다리지 않고 즉시 재시도로 넘어갈 수 있게 한다.
     반환: 'items' | 'error' | 'timeout'
     """
-    items_xpath = "//div[contains(@class, 'exa4ze60') or contains(@class, 'css-220836')]"
+    items_xpath = post_card_xpath()
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -586,6 +700,21 @@ def _extension_from_response(src, content_type):
     return "jpg"
 
 
+def _debug_output_dir():
+    """디버그 산출물 저장 폴더.
+
+    단일 exe(PyInstaller onefile)에서는 __file__이 종료 시 삭제되는 임시폴더를 가리켜
+    저장해도 사라진다. 사용자가 실제로 찾아볼 수 있는 로그 폴더로 통일한다.
+    """
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    path = os.path.join(base, "KidsnoteMemoriesSaver", "logs")
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError:
+        return os.path.dirname(os.path.abspath(__file__))
+    return path
+
+
 def _stop_requested(check_stop_callback):
     try:
         return bool(check_stop_callback and check_stop_callback())
@@ -665,7 +794,8 @@ def save_debug_snapshot(driver, step_name, log_func=print, mem=None):
         date_folder = now.strftime("%Y%m%d")
         time_prefix = now.strftime("%H%M%S")
         
-        debug_dir = os.path.join(os.getcwd(), "Kidsnote_Debug_Logs", date_folder)
+        # 실행 위치(os.getcwd)는 단일 exe에서 임시폴더일 수 있으므로 로그 폴더 기준으로 저장
+        debug_dir = os.path.join(_debug_output_dir(), "Kidsnote_Debug_Logs", date_folder)
         os.makedirs(debug_dir, exist_ok=True)
         
         safe_step = "".join(c for c in step_name if c not in r'\/:*?"<>|').strip()
@@ -727,19 +857,38 @@ def _scrape_list_pages(driver, item_type, memories, log, item_found_callback=Non
         # 스켈레톤/부분 렌더링 대응: 카드 개수가 안정될 때까지 짧게 폴링.
         # (첫 카드 하나만 뜬 순간 수집을 시작해 '1개 수집 완료(빈 행)'로 끝나는 증상 방지)
         post_items = []
+        used_fallback = False
         try:
             prev_count = -1
             stable_deadline = time.time() + 6
             while time.time() < stable_deadline:
-                post_items = driver.find_elements(By.XPATH, "//div[contains(@class, 'exa4ze60') or contains(@class, 'css-220836')]")
+                post_items, used_fallback = _find_post_cards(driver, log)
                 if len(post_items) == prev_count and prev_count > 0:
                     break
                 prev_count = len(post_items)
                 time.sleep(0.4)
         except Exception:
-            post_items = driver.find_elements(By.XPATH, "//div[contains(@class, 'exa4ze60') or contains(@class, 'css-220836')]")
+            post_items, used_fallback = _find_post_cards(driver, log)
+
+        if used_fallback:
+            info['selector_fallback'] = True
 
         total_items = len(post_items)
+
+        # 화면에는 내용이 잔뜩 떠 있는데 게시물을 하나도 인식하지 못했다면,
+        # '게시물이 없는 것'이 아니라 키즈노트 화면 구성이 바뀌어 우리가 못 알아보는
+        # 상황일 가능성이 높다. 사용자에게 구분해 안내하기 위해 표시해 둔다.
+        if total_items == 0:
+            try:
+                link_count = driver.execute_script("return document.querySelectorAll('a[href]').length;") or 0
+                body_len = driver.execute_script("return (document.body.innerText || '').length;") or 0
+                if link_count > 20 and body_len > 500:
+                    info['selector_broken'] = True
+                    log("[KN-DIAG] 게시물 0개인데 화면에는 내용 있음(links=%s, text=%s) → 화면 구성 변경 의심"
+                        % (link_count, body_len))
+            except Exception:
+                pass
+
         info['items_seen'] = info.get('items_seen', 0) + total_items
         log(f"DEBUG: 게시물 항목을 {total_items}개 찾음.")
 
@@ -751,7 +900,7 @@ def _scrape_list_pages(driver, item_type, memories, log, item_found_callback=Non
                     "return arguments[0].parentElement ? arguments[0].parentElement.outerHTML : arguments[0].outerHTML;",
                     post_items[0]
                 )
-                debug_item_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug_post_item.html")
+                debug_item_path = os.path.join(_debug_output_dir(), "debug_post_item.html")
                 with open(debug_item_path, "w", encoding="utf-8") as f:
                     f.write(parent_html)
                 log(f"DEBUG: 부모 요소 HTML → {debug_item_path}")
@@ -797,14 +946,15 @@ def _scrape_list_pages(driver, item_type, memories, log, item_found_callback=Non
 
                 # 날짜 추출
                 try:
-                    date_elem = post.find_element(By.XPATH, ".//div[contains(@class, 'exa4ze65')]/div")
+                    date_elem = post.find_element(By.XPATH, CARD_DATE_XPATH)
                     raw_date = date_elem.text.strip()
                 except NoSuchElementException:
                     try:
-                        date_elem = post.find_element(By.CLASS_NAME, "css-15xrcbi").find_element(By.TAG_NAME, "span")
+                        date_elem = post.find_element(By.CLASS_NAME, CARD_DATE_CLASS).find_element(By.TAG_NAME, "span")
                         raw_date = date_elem.text.strip()
                     except:
-                        raw_date = "날짜 알 수 없음"
+                        # 클래스가 바뀐 경우: 카드 텍스트에서 날짜 형태를 직접 찾는다
+                        raw_date = _first_date_like_line(post) or "날짜 알 수 없음"
                 date = raw_date
                 if date != "날짜 알 수 없음" and date:
                     import re, datetime
@@ -823,15 +973,16 @@ def _scrape_list_pages(driver, item_type, memories, log, item_found_callback=Non
                 # 제목/내용 추출
                 try:
                     # 알림장의 경우 보통 본문이 제목 역할을 함
-                    title_elem = post.find_element(By.XPATH, ".//div[contains(@class, 'e14iqn2g4')]")
+                    title_elem = post.find_element(By.XPATH, CARD_BODY_XPATH)
                     full_text = title_elem.text.strip()
                     title = full_text[:35].replace('\n', ' ') + "..." if len(full_text) > 35 else full_text.replace('\n', ' ')
                 except NoSuchElementException:
                     try:
-                        title_elem = post.find_element(By.CLASS_NAME, "css-12g7lcb")
+                        title_elem = post.find_element(By.CLASS_NAME, CARD_BODY_CLASS)
                         title = title_elem.text.strip()[:35]
                     except:
-                        title = "제목 알 수 없음"
+                        # 클래스가 바뀐 경우: 카드 텍스트에서 날짜/작성자가 아닌 가장 긴 줄을 본문으로 본다
+                        title = _longest_content_line(post) or "제목 알 수 없음"
                 
                 url = None
                 try:
@@ -972,7 +1123,7 @@ def navigate_to_memory_view(driver, item_type_label, log_func, target_child=None
         if not clicked:
             try:
                 mem_btn = WebDriverWait(driver, 20).until(
-                    EC.element_to_be_clickable((By.XPATH, "//*[contains(@class,'e1q0zrbj0') and contains(.,'추억보기')]"))
+                    EC.element_to_be_clickable((By.XPATH, "//*[contains(@class,'" + MEMORY_MENU_CLASS + "') and contains(.,'추억보기')]"))
                 )
                 driver.execute_script("arguments[0].click();", mem_btn)
                 time.sleep(0.5)
@@ -987,7 +1138,7 @@ def navigate_to_memory_view(driver, item_type_label, log_func, target_child=None
                 driver.execute_script("arguments[0].click();", toggle)
                 time.sleep(0.5)
                 mem_link = WebDriverWait(driver, 15).until(
-                    EC.element_to_be_clickable((By.XPATH, "//*[contains(@class,'e1efjxmz8') and contains(.,'추억보기')]"))
+                    EC.element_to_be_clickable((By.XPATH, "//*[contains(@class,'" + MEMORY_MENU_LINK_CLASS + "') and contains(.,'추억보기')]"))
                 )
                 driver.execute_script("arguments[0].click();", mem_link)
                 time.sleep(0.5)
@@ -1100,7 +1251,7 @@ def fetch_memory_list(driver, status_callback=None, item_found_callback=None, ch
                 "var s = document.querySelector('nav') || document.querySelector('[class*=\"sidebar\"]') || document.querySelector('aside');"
                 "return s ? s.outerHTML : document.body.innerHTML.substring(0, 30000);"
             )
-            debug_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug_sidebar.html")
+            debug_path = os.path.join(_debug_output_dir(), "debug_sidebar.html")
             with open(debug_path, "w", encoding="utf-8") as f:
                 f.write(f"<!-- URL: {driver.current_url} -->\n" + (sidebar_html or ""))
             log(f"DEBUG: 사이드바 HTML → {debug_path}")
@@ -1242,7 +1393,7 @@ def download_as_pdf(driver, post_info, target_path, status_callback=None, check_
         # 페이지 로딩 완료까지 충분히 대기 (앨범의 경우 본문 텍스트가 없을 수 있어 이미지라도 뜨면 통과하도록 조건 변경)
         try:
             WebDriverWait(driver, 10).until(
-                lambda d: d.find_elements(By.CLASS_NAME, "css-1469k6q") or d.find_elements(By.TAG_NAME, "img")
+                lambda d: d.find_elements(By.CLASS_NAME, ALBUM_BODY_CLASS) or d.find_elements(By.TAG_NAME, "img")
             )
         except:
             pass
@@ -1381,7 +1532,7 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
         try:
             # 앨범의 경우 본체 로딩 확인을 위해 넉넉한 대기 필요
             WebDriverWait(driver, 10).until(
-                lambda d: len(d.find_elements(By.TAG_NAME, "img")) > 1 or d.find_elements(By.CLASS_NAME, "css-1469k6q")
+                lambda d: len(d.find_elements(By.TAG_NAME, "img")) > 1 or d.find_elements(By.CLASS_NAME, ALBUM_BODY_CLASS)
             )
         except:
             pass 
@@ -1721,12 +1872,12 @@ def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None,
     # Need to navigate
     try:
         def _find_target():
-            post_items = driver.find_elements(By.XPATH, "//div[contains(@class, 'exa4ze60') or contains(@class, 'css-220836')]")
+            post_items = driver.find_elements(By.XPATH, post_card_xpath())
             for post in post_items:
                 try:
                     raw_date = None
-                    try: raw_date = post.find_element(By.XPATH, ".//div[contains(@class, 'exa4ze65')]/div").text.strip()
-                    except: raw_date = post.find_element(By.CLASS_NAME, "css-15xrcbi").find_element(By.TAG_NAME, "span").text.strip()
+                    try: raw_date = post.find_element(By.XPATH, CARD_DATE_XPATH).text.strip()
+                    except: raw_date = post.find_element(By.CLASS_NAME, CARD_DATE_CLASS).find_element(By.TAG_NAME, "span").text.strip()
                     
                     d = raw_date
                     if d and d != "날짜 알 수 없음":
@@ -1744,11 +1895,11 @@ def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None,
                             d = f"{y}.{int(m):02d}.{int(day):02d}"
                     
                     try:
-                        full_text = post.find_element(By.XPATH, ".//div[contains(@class, 'e14iqn2g4')]").text.strip()
+                        full_text = post.find_element(By.XPATH, CARD_BODY_XPATH).text.strip()
                         t = full_text[:35].replace('\n', ' ') + "..." if len(full_text) > 35 else full_text.replace('\n', ' ')
                     except:
                         try:
-                            t = post.find_element(By.CLASS_NAME, "css-12g7lcb").text.strip()[:35]
+                            t = post.find_element(By.CLASS_NAME, CARD_BODY_CLASS).text.strip()[:35]
                         except:
                             t = ""
 
@@ -1818,7 +1969,7 @@ def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None,
                     return False
                 try:
                     WebDriverWait(driver, 10).until(
-                        EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'exa4ze60') or contains(@class, 'css-220836')]"))
+                        EC.presence_of_element_located((By.XPATH, post_card_xpath()))
                     )
                 except: pass
                 next_buttons = driver.find_elements(By.XPATH, "//button[.//span[starts-with(text(), '다음')]]")
@@ -1836,7 +1987,7 @@ def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None,
 
             try:
                 WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'exa4ze60') or contains(@class, 'css-220836')]"))
+                    EC.presence_of_element_located((By.XPATH, post_card_xpath()))
                 )
                 time.sleep(1)
             except:
