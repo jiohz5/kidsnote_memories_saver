@@ -478,6 +478,9 @@ class KidsnoteApp(QtWidgets.QWidget):
         def FS(val):
             # FHD(scale 0.5)일 때 폰트가 절반으로 확 줄어들지 않고, 다소 완만하게 줄어들도록 보정(0.8 제곱) 및 하한선 제한
             return max(11, int(val * (scale ** 0.8)))
+
+        # FS는 init_ui 안에서만 보이는 지역 함수이므로, 다른 메서드에서도 쓸 수 있게 보관해 둔다
+        self._FS = FS
             
         # 화면의 60~70% 정도만 차지하도록 콤팩트하게 GUI 높이를 줄여서 시야 확보 (기준 1600 -> 1500 (레이아웃 잘림 방지용으로 살짝 여유 추가))
         target_height = FS(1500)
@@ -682,7 +685,10 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.status_label = QtWidgets.QLabel('준비됨')
         self.status_label.setAlignment(QtCore.Qt.AlignCenter)
         self.status_label.setStyleSheet(f"font-weight: bold; color: white; background-color: #03A9F4; font-size: {FS(16)}px; padding: {FS(8)}px; border-radius: {S(5)}px;")
-        status_prog_layout.addWidget(self.status_label, stretch=1)
+        # 상태 문구는 '다운로드 중 (50/681) · 약 6분 남음: 제목...'처럼 길어지므로
+        # 진행률 바보다 넓게 잡는다 (예전에는 1:2로 좁아 글자가 잘렸다).
+        self.status_label.setMinimumWidth(FS(280))
+        status_prog_layout.addWidget(self.status_label, stretch=4)
         
         self.progress_bar = QtWidgets.QProgressBar()
         self.progress_bar.setValue(0)
@@ -702,7 +708,8 @@ class KidsnoteApp(QtWidgets.QWidget):
                 border-radius: {S(3)}px;
             }}
         """)
-        status_prog_layout.addWidget(self.progress_bar, stretch=2)
+        self.progress_bar.setMinimumWidth(FS(120))
+        status_prog_layout.addWidget(self.progress_bar, stretch=1)
 
         # 진단 정보 복사 버튼 — 문제 발생 시 원클릭으로 [KN-DIAG] 로그를 클립보드에 담아 개발자에게 전달
         self.diag_btn = QtWidgets.QPushButton("🔧 진단정보 복사")
@@ -2525,7 +2532,23 @@ class KidsnoteApp(QtWidgets.QWidget):
         # 진단 마커가 붙은 줄은 로그 파일에도 남겨 사용자가 나중에 긁어올 수 있게 한다
         if isinstance(msg, str) and "[KN-DIAG]" in msg:
             write_app_log(msg)
-        self.run_on_ui_thread(lambda: self.status_label.setText(msg))
+        self.run_on_ui_thread(lambda: self._set_status_text(msg))
+
+    def _set_status_text(self, msg):
+        """상태 문구를 폭에 맞춰 표시. 길면 글자가 잘리는 대신 끝을 '...'로 줄인다.
+
+        게시물 제목이 붙으면 문구가 길어지는데, 그냥 두면 글자 중간이 잘려 나가
+        무슨 내용인지 알 수 없다. 전체 문구는 마우스를 올리면 볼 수 있게 툴팁에 넣는다.
+        """
+        try:
+            fs = getattr(self, '_FS', lambda v: v)   # FS는 init_ui 지역 함수라 보관해 둔 것을 쓴다
+            metrics = QtGui.QFontMetrics(self.status_label.font())
+            avail = max(fs(60), self.status_label.width() - fs(20))
+            self.status_label.setText(metrics.elidedText(msg, QtCore.Qt.ElideRight, avail))
+            self.status_label.setToolTip(msg if metrics.width(msg) > avail else "")
+        except Exception:
+            write_app_log("Status elide failed:\n" + traceback.format_exc())
+            self.status_label.setText(msg)
 
     def open_feedback(self):
         """의견/버그 제보 페이지를 연다. 진단정보를 함께 복사할지 먼저 묻는다."""
