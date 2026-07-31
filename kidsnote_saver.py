@@ -13,6 +13,10 @@ import kidsnote_engine as manager
 
 APP_VERSION = "1.05"
 UPDATE_CHECK_REPO = "jiohz5/kidsnote_memories_saver"
+# 의견/버그 제보를 받을 곳
+FEEDBACK_URL = f"https://github.com/{UPDATE_CHECK_REPO}/issues/new"
+# 후원 링크 (예: Buy Me a Coffee / 토스 송금). 값을 채우면 앱에 '☕ 후원하기' 버튼이 나타납니다.
+DONATION_URL = ""
 
 _fault_log_file = None
 
@@ -109,6 +113,25 @@ class ScrapeThread(QtCore.QThread):
                                                             
     def stop(self):
         self.is_stopped = True
+
+
+def _safe_title_fragment(title, limit=30):
+    """게시물 제목을 파일명에 쓸 수 있는 짧은 조각으로 변환.
+
+    윈도우 파일명 금지문자(\\ / : * ? " < > |)와 줄바꿈을 제거하고,
+    끝의 공백·마침표(윈도우에서 허용되지 않음)를 정리한 뒤 길이를 제한한다.
+    쓸 만한 글자가 남지 않으면 빈 문자열을 반환한다(그 경우 제목 없이 저장).
+    """
+    import re as _re
+    text = (title or "").strip()
+    if not text or text.startswith("제목 알 수 없음"):
+        return ""
+    text = text.replace("...", " ")
+    text = _re.sub(r'[\\/:*?"<>|\r\n\t]', " ", text)
+    text = _re.sub(r"\s+", " ", text).strip()
+    text = text[:limit].strip()
+    text = text.rstrip(". ")          # 윈도우는 마침표/공백으로 끝나는 이름을 허용하지 않음
+    return text
 
 
 class CheckStateItem(QtWidgets.QTableWidgetItem):
@@ -249,16 +272,25 @@ class DownloadThread(QtCore.QThread):
 
                         prefix_str = f"{date_prefix}_{item_type}" if post_index == 0 else f"{date_prefix}_{item_type}_{post_index}"
 
+                        # 파일명에 제목 일부를 붙여 열어보지 않아도 내용을 알 수 있게 한다
+                        title_part = _safe_title_fragment(mem.get('title', ''))
+                        filename = f"{prefix_str}_{title_part}.pdf" if title_part else f"{prefix_str}.pdf"
+
                         if self.is_single_folder:
-                            filename = f"{prefix_str}_{mem.get('title', 'Unknown')}.pdf"
-                            filename = re.sub(r'[\\/*?"<>|]', "", filename).strip()
                             path = os.path.join(base_target_dir, filename)
                         else:
-                            filename = f"{prefix_str}.pdf"
-                            filename = re.sub(r'[\\/*?"<>|]', "", filename).strip()
                             date_dir = os.path.join(base_target_dir, clean_date)
                             os.makedirs(date_dir, exist_ok=True)
                             path = os.path.join(date_dir, filename)
+                            # 예전 버전은 제목 없이 저장했다. 같은 게시물의 옛 파일이 있으면
+                            # 새 이름으로 바꿔서 같은 글이 두 벌로 쌓이는 것을 막는다.
+                            legacy_path = os.path.join(date_dir, f"{prefix_str}.pdf")
+                            if title_part and os.path.exists(legacy_path) and not os.path.exists(path):
+                                try:
+                                    os.replace(legacy_path, path)
+                                    write_app_log(f"Renamed legacy PDF to titled name: {os.path.basename(path)}")
+                                except OSError:
+                                    pass
 
                         step_results.append(manager.download_item(
                             self.driver,
@@ -654,6 +686,23 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.diag_btn.setFixedHeight(FS(34))
         self.diag_btn.setStyleSheet(f"QPushButton {{ background-color: #64748B; color: white; font-weight: bold; border-radius: {S(5)}px; padding: 0 {S(8)}px; font-size: {FS(12)}px; }} QPushButton:hover {{ background-color: #475569; }}")
         status_prog_layout.addWidget(self.diag_btn)
+
+        # 의견/버그 제보 — 비개발자도 부담 없이 남길 수 있도록 안내 후 브라우저로 열어준다
+        self.feedback_btn = QtWidgets.QPushButton("💬 의견 보내기")
+        self.feedback_btn.setToolTip("버그 제보나 개선 의견을 남깁니다 (GitHub 페이지가 열립니다)")
+        self.feedback_btn.clicked.connect(self.open_feedback)
+        self.feedback_btn.setFixedHeight(FS(34))
+        self.feedback_btn.setStyleSheet(f"QPushButton {{ background-color: #0EA5E9; color: white; font-weight: bold; border-radius: {S(5)}px; padding: 0 {S(8)}px; font-size: {FS(12)}px; }} QPushButton:hover {{ background-color: #0284C7; }}")
+        status_prog_layout.addWidget(self.feedback_btn)
+
+        # 후원하기 — DONATION_URL을 채우면 자동으로 버튼이 나타난다 (지금은 숨김)
+        if DONATION_URL:
+            self.donate_btn = QtWidgets.QPushButton("☕ 후원하기")
+            self.donate_btn.setToolTip("이 프로그램이 도움이 되셨다면 개발자에게 커피 한 잔 :)")
+            self.donate_btn.clicked.connect(self.open_donation)
+            self.donate_btn.setFixedHeight(FS(34))
+            self.donate_btn.setStyleSheet(f"QPushButton {{ background-color: #F59E0B; color: white; font-weight: bold; border-radius: {S(5)}px; padding: 0 {S(8)}px; font-size: {FS(12)}px; }} QPushButton:hover {{ background-color: #D97706; }}")
+            status_prog_layout.addWidget(self.donate_btn)
         main_layout.addLayout(status_prog_layout)
 
         # Collect Options Group (1단계: 아이 현황 및 수집 범위)
@@ -2376,6 +2425,54 @@ class KidsnoteApp(QtWidgets.QWidget):
         if isinstance(msg, str) and "[KN-DIAG]" in msg:
             write_app_log(msg)
         self.run_on_ui_thread(lambda: self.status_label.setText(msg))
+
+    def open_feedback(self):
+        """의견/버그 제보 페이지를 연다. 진단정보를 함께 복사할지 먼저 묻는다."""
+        import webbrowser
+        import urllib.parse
+
+        reply = self._show_top_question(
+            "의견 보내기",
+            "버그 제보나 개선 의견을 남길 수 있는 페이지를 엽니다.\n"
+            "(GitHub 페이지가 브라우저로 열립니다)\n\n"
+            "먼저 진단정보를 클립보드에 복사할까요?\n"
+            "문제 상황을 알려주실 때 붙여넣으면 원인 파악이 훨씬 빨라집니다.\n\n"
+            "⚠ 공개되는 페이지이므로 아이 이름·사진은 넣지 말아 주세요."
+        )
+        if reply == QtWidgets.QMessageBox.Yes:
+            self.copy_diagnostics()
+
+        template = (
+            "### 어떤 상황이었나요?\n\n"
+            "(예: 목록 불러오기를 눌렀는데 0건으로 나옵니다)\n\n"
+            "### 사용 환경\n"
+            f"- 프로그램 버전: V{APP_VERSION}\n"
+            "- 사용 위치: (집 / 회사 등)\n\n"
+            "### 진단정보\n"
+            "(앱의 [🔧 진단정보 복사]로 복사한 내용을 붙여넣어 주세요)\n\n"
+            "---\n"
+            "※ 아이 이름·사진 등 개인정보는 넣지 말아 주세요. 공개되는 페이지입니다.\n"
+        )
+        try:
+            url = FEEDBACK_URL + "?title=" + urllib.parse.quote("[의견] ") + "&body=" + urllib.parse.quote(template)
+            webbrowser.open(url)
+        except Exception:
+            write_app_log("Feedback page open failed:\n" + traceback.format_exc())
+            self._show_top_message(
+                QtWidgets.QMessageBox.Warning, "페이지를 열지 못했습니다",
+                "브라우저를 여는 데 실패했습니다. 아래 주소로 직접 접속해 주세요.\n\n" + FEEDBACK_URL
+            )
+
+    def open_donation(self):
+        """후원 페이지 열기 (DONATION_URL이 설정된 경우에만 버튼이 존재)."""
+        import webbrowser
+        try:
+            webbrowser.open(DONATION_URL)
+        except Exception:
+            self._show_top_message(
+                QtWidgets.QMessageBox.Warning, "페이지를 열지 못했습니다",
+                "아래 주소로 직접 접속해 주세요.\n\n" + DONATION_URL
+            )
 
     def copy_diagnostics(self):
         """오늘 로그의 [KN-DIAG] 진단 라인을 클립보드에 복사 (문제 신고용)."""
