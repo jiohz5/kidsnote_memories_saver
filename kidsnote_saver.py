@@ -938,9 +938,12 @@ class KidsnoteApp(QtWidgets.QWidget):
 
         options_grid = QtWidgets.QGridLayout()
         options_grid.setSpacing(FS(5))  # 그리드 사이 간격 축소
-        options_grid.addWidget(overwrite_group_box, 0, 0)
-        options_grid.addWidget(filetype_group_box, 0, 1)
-        options_grid.addWidget(folder_group_box, 1, 0, 1, 2)
+        # 배치 주의: '다운로드 항목 종류'는 라디오 3개 + 체크박스로 이 화면에서 가장 넓은 줄이다.
+        # 좁은 칸에 두면 고배율 디스플레이에서 글자가 잘리므로 한 줄 전체를 쓰게 하고,
+        # 상대적으로 짧은 '저장 방식'과 '덮어쓰기'를 위쪽 두 칸에 나눠 배치한다.
+        options_grid.addWidget(folder_group_box, 0, 0)
+        options_grid.addWidget(overwrite_group_box, 0, 1)
+        options_grid.addWidget(filetype_group_box, 1, 0, 1, 2)
         
         options_layout.addLayout(options_grid)
         
@@ -1012,6 +1015,23 @@ class KidsnoteApp(QtWidgets.QWidget):
 
         # 위치 계산에 필요한 핵심 위젯 참조 저장
         self.table_group = table_group
+
+        # --- 옵션 문구 잘림 방지 (고배율 디스플레이 대응) ---
+        # 창 너비는 scale^0.7로 늘어나는데 글자 폭은 scale에 비례해 늘어나므로,
+        # 175~200% 배율에서는 '다운로드 항목 종류' 라디오 문구가 잘렸다.
+        # 창이 고정 크기라 사용자가 늘릴 수도 없으므로, 레이아웃이 실제로 요구하는
+        # 너비를 계산해 부족하면 창을 그만큼 넓힌다 (화면 폭 안에서).
+        try:
+            required = self.sizeHint().width()
+            current = self.width()
+            if required > current:
+                screen_w = QtWidgets.QApplication.primaryScreen().availableGeometry().width()
+                new_w = min(required + FS(10), max(current, screen_w - FS(40)))
+                if new_w > current:
+                    self.setFixedSize(new_w, self.height())
+                    write_app_log(f"Window widened for text fit: {current} -> {new_w} (required={required})")
+        except Exception:
+            pass
 
     # --- 로딩 및 잠금 오버레이 제어 ---
     def resizeEvent(self, event):
@@ -1624,9 +1644,28 @@ class KidsnoteApp(QtWidgets.QWidget):
             # 작업 중 드라이버 동시 조작 방지 (사실상 콤보는 잠겨 있지만 이중 방어)
             self.update_status("작업이 진행 중이라 아이 전환을 할 수 없습니다. 작업 완료 후 다시 선택하세요.")
             return
+        if not self._require_browser("아이 전환"):
+            return
 
         child_info = self.children_data[index]
         combo_text = self.child_combo.currentText()
+
+        # 다른 아이로 바꾸면 화면에 남아 있는 목록은 이전 아이의 것이라 더 이상 유효하지 않다.
+        # 그대로 두면 '보이는 아이'와 '실제 목록'이 어긋난 채 다운로드로 이어질 수 있어 비운다.
+        if self.memories:
+            self.memories = []
+            self.table.setRowCount(0)
+            self.update_selection_label()
+            self.download_btn.setEnabled(False)
+            if hasattr(self, 'stage2_lock_overlay'):
+                self.stage2_lock_overlay.show()
+                self.stage2_lock_overlay.raise_()
+            self._show_top_message(
+                QtWidgets.QMessageBox.Information, "목록을 다시 불러와 주세요",
+                f"[{combo_text}] (으)로 전환했습니다.\n\n"
+                "이전 아이의 목록은 초기화했습니다. "
+                "[추억 목록 불러오기]를 다시 눌러 주세요."
+            )
         # 드라이버 명령(driver.get + sleep)을 GUI 스레드에서 실행하면 사내망 지연 시
         # 최대 페이지 로드 타임아웃(120초)까지 UI 전체가 얼어붙으므로 백그라운드로 이동
         self.child_combo.setEnabled(False)
@@ -1720,6 +1759,50 @@ class KidsnoteApp(QtWidgets.QWidget):
         box.activateWindow()
         return box.exec_()
 
+    def _driver_alive(self):
+        """브라우저 창이 아직 살아 있는지 확인.
+
+        사용자가 Edge 창을 직접 닫아도 self.driver 객체는 그대로 남아 있어서,
+        객체 유무만 보면 '연결되어 있다'고 오판한다. 실제로 세션에 말을 걸어 확인한다.
+        """
+        if not self.driver:
+            return False
+        try:
+            self.driver.window_handles  # 세션이 끊겼으면 예외 발생
+            return True
+        except Exception:
+            return False
+
+    def _require_browser(self, action_name="작업"):
+        """브라우저가 살아있지 않으면 안내하고 로그인 전 상태로 되돌린다."""
+        if self._driver_alive():
+            return True
+
+        write_app_log(f"Browser session lost before {action_name}")
+        self.driver = None
+        self.memories = []
+        self.table.setRowCount(0)
+        self.update_selection_label()
+        self.download_btn.setEnabled(False)
+        self.load_btn.setEnabled(False)
+        self.child_combo.clear()
+        self.children_data = []
+        if hasattr(self, 'lock_overlay'):
+            self.lock_overlay.show()
+            self.lock_overlay.raise_()
+        if hasattr(self, 'stage2_lock_overlay'):
+            self.stage2_lock_overlay.hide()
+        self.login_btn.setEnabled(True)
+        self.login_btn.setText("1. 키즈노트 로그인 열기")
+        self.update_status("브라우저 연결이 끊어졌습니다. 다시 로그인해 주세요.")
+        self._show_top_message(
+            QtWidgets.QMessageBox.Warning, "브라우저 연결 끊김",
+            "키즈노트 브라우저 창이 닫혀 있어 " + action_name + "을(를) 계속할 수 없습니다.\n\n"
+            "브라우저 창을 직접 닫으셨다면 [1. 키즈노트 로그인 열기]로 다시 시작해 주세요.\n"
+            "(이미 받은 파일은 그대로 보존됩니다.)"
+        )
+        return False
+
     def _set_shared_controls_enabled(self, enabled):
         """수집/다운로드 중 동일 Edge 드라이버를 건드릴 수 있는 컨트롤을 일괄 잠금/해제.
 
@@ -1769,6 +1852,8 @@ class KidsnoteApp(QtWidgets.QWidget):
 
     def load_memories(self):
         if not self.driver: return
+        if not self._require_browser("목록 불러오기"):
+            return
         if self.is_downloading or self.is_loading_memories:
             QtWidgets.QMessageBox.warning(self, "안내", "이미 작업이 진행 중입니다. 완료 또는 중지 후 다시 시도하세요.")
             return
@@ -2062,6 +2147,8 @@ class KidsnoteApp(QtWidgets.QWidget):
         if not self.driver:
             QtWidgets.QMessageBox.warning(self, "오류", "브라우저 연결이 없습니다. 로그인부터 다시 진행해 주세요.")
             return
+        if not self._require_browser("다운로드"):
+            return
         if self.is_downloading or self.is_loading_memories:
             QtWidgets.QMessageBox.warning(self, "안내", "이미 작업이 진행 중입니다. 완료 또는 중지 후 다시 시도하세요.")
             return
@@ -2096,16 +2183,39 @@ class KidsnoteApp(QtWidgets.QWidget):
         is_single_folder = self.folder_single_radio.isChecked()
         include_video = not self.chk_exclude_video.isChecked()
 
-        # 아이 이름: 콤보박스 텍스트에서 첫 단어(이름)만 콕직으로 추출 및 특수문자 제거
-        profile_name = "알수없음"
-        try:
-            combo_text = self.child_combo.currentText().strip()
-            if combo_text:
-                import re
-                first_word = combo_text.split()[0]  # "최승아 23.7.14." → "최승아"
-                profile_name = re.sub(r'[\\/*?:"<>|]', "", first_word)
-        except:
-            pass
+        # 저장 폴더에 쓸 아이 이름.
+        # 중요: 콤보박스의 '현재 선택'이 아니라 '실제로 수집된 항목'에 기록된 아이 이름을 쓴다.
+        # (2번 아이로 목록을 불러온 뒤 콤보만 1번 아이로 바꾸고 다운로드하면,
+        #  2번 아이의 게시물이 1번 아이 폴더에 저장되던 문제를 방지)
+        import re as _re
+        collected_names = []
+        for i in selected_indices:
+            if 0 <= i < len(self.memories):
+                nm = (self.memories[i].get('child_name') or "").strip()
+                if nm and nm not in collected_names:
+                    collected_names.append(nm)
+
+        profile_name = ""
+        if len(collected_names) == 1:
+            profile_name = collected_names[0]
+        elif len(collected_names) > 1:
+            # 여러 아이가 섞여 있으면 폴더를 뭉뚱그리지 않고 사용자에게 알린다
+            QtWidgets.QMessageBox.warning(
+                self, "여러 아이가 섞여 있습니다",
+                "선택한 항목에 서로 다른 아이의 기록이 섞여 있습니다:\n"
+                + ", ".join(collected_names)
+                + "\n\n아이별로 나눠서 다운로드해 주세요. (목록을 다시 불러오면 깔끔합니다)"
+            )
+            return
+        if not profile_name:
+            # 수집 항목에 아이 정보가 없을 때만 콤보박스를 폴백으로 사용
+            try:
+                combo_text = self.child_combo.currentText().strip()
+                if combo_text:
+                    profile_name = combo_text.split()[0]  # "최승아 23.7.14." → "최승아"
+            except Exception:
+                pass
+        profile_name = _re.sub(r'[\\/*?:"<>|]', "", profile_name).strip() or "알수없음"
 
         self.download_btn.setEnabled(False)
         # 다운로드 중 목록 재수집/아이 전환이 같은 드라이버를 건드리지 못하도록 잠금
