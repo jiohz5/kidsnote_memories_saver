@@ -679,17 +679,20 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.tray_icon.setIcon(app_icon)
         self.tray_icon.show()
 
-        # Status Label and Progress Bar 
-        status_prog_layout = QtWidgets.QHBoxLayout()
-        
+        # Status Label and Progress Bar
+        # 상태 문구는 '다운로드 중 (50/681) · 약 6분 남음: 긴 제목...'처럼 길어지므로
+        # 진행률/버튼과 한 줄을 나눠 쓰지 않고 한 줄 전체를 혼자 쓰게 한다.
+        status_area_layout = QtWidgets.QVBoxLayout()
+        status_area_layout.setSpacing(FS(5))
+
         self.status_label = QtWidgets.QLabel('준비됨')
         self.status_label.setAlignment(QtCore.Qt.AlignCenter)
         self.status_label.setStyleSheet(f"font-weight: bold; color: white; background-color: #03A9F4; font-size: {FS(16)}px; padding: {FS(8)}px; border-radius: {S(5)}px;")
-        # 상태 문구는 '다운로드 중 (50/681) · 약 6분 남음: 제목...'처럼 길어지므로
-        # 진행률 바보다 넓게 잡는다 (예전에는 1:2로 좁아 글자가 잘렸다).
-        self.status_label.setMinimumWidth(FS(280))
-        status_prog_layout.addWidget(self.status_label, stretch=4)
-        
+        status_area_layout.addWidget(self.status_label)
+
+        # 아랫줄: 진행률 바 + 보조 버튼들
+        status_prog_layout = QtWidgets.QHBoxLayout()
+
         self.progress_bar = QtWidgets.QProgressBar()
         self.progress_bar.setValue(0)
         self.progress_bar.setTextVisible(True)
@@ -735,7 +738,8 @@ class KidsnoteApp(QtWidgets.QWidget):
             self.donate_btn.setFixedHeight(FS(34))
             self.donate_btn.setStyleSheet(f"QPushButton {{ background-color: #F59E0B; color: white; font-weight: bold; border-radius: {S(5)}px; padding: 0 {S(8)}px; font-size: {FS(12)}px; }} QPushButton:hover {{ background-color: #D97706; }}")
             status_prog_layout.addWidget(self.donate_btn)
-        main_layout.addLayout(status_prog_layout)
+        status_area_layout.addLayout(status_prog_layout)
+        main_layout.addLayout(status_area_layout)
 
         # Collect Options Group (1단계: 아이 현황 및 수집 범위)
         collect_group = QtWidgets.QGroupBox("1단계: 아이 현황 및 수집 범위")
