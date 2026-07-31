@@ -231,7 +231,21 @@ class DownloadThread(QtCore.QThread):
                     self.failed_indices.append(idx)
                     continue
 
-                self.status_signal.emit(f"다운로드 중 ({count + 1}/{total}): {mem.get('title', '')}")
+                # 진행 상황 + 남은 시간 예상 (지금까지 실제 소요된 평균 속도 기준).
+                # 오래 걸리는 작업에서 '얼마나 더 기다려야 하나'가 가장 큰 불안 요소이므로
+                # 몇 개를 처리해 평균이 어느 정도 안정된 뒤부터 함께 보여준다.
+                eta_text = ""
+                if count >= 2:
+                    elapsed = time.time() - started_at
+                    per_item = elapsed / count
+                    remain = int(per_item * (total - count))
+                    if remain >= 60:
+                        eta_text = f" · 약 {remain // 60}분 {remain % 60}초 남음"
+                    elif remain > 0:
+                        eta_text = f" · 약 {remain}초 남음"
+                self.status_signal.emit(
+                    f"다운로드 중 ({count + 1}/{total}){eta_text}: {mem.get('title', '')}"
+                )
 
                 try:
                     clean_date = re.sub(r'[\\/*?:"<>|]', "", mem.get('date', '')).strip().rstrip('.')
@@ -1065,6 +1079,15 @@ class KidsnoteApp(QtWidgets.QWidget):
         # 위치 계산에 필요한 핵심 위젯 참조 저장
         self.table_group = table_group
 
+        # 이전 실행에서 쓰던 저장 경로·옵션 복원 (매번 다시 고르지 않도록)
+        self._restore_prefs()
+
+        # 아이디/비밀번호 입력 후 Enter로 바로 로그인 (마우스로 버튼을 찾지 않아도 되게)
+        self.id_input.returnPressed.connect(lambda: self.pw_input.setFocus())
+        self.pw_input.returnPressed.connect(
+            lambda: self.login_btn.click() if self.login_btn.isEnabled() else None
+        )
+
         # --- 옵션 문구 잘림 방지 (고배율 디스플레이 대응) ---
         # 창 너비는 scale^0.7로 늘어나는데 글자 폭은 scale에 비례해 늘어나므로,
         # 175~200% 배율에서는 '다운로드 항목 종류' 라디오 문구가 잘렸다.
@@ -1808,6 +1831,55 @@ class KidsnoteApp(QtWidgets.QWidget):
         box.activateWindow()
         return box.exec_()
 
+    # ── 사용자 선택 기억 (저장 경로·다운로드 옵션) ──────────────────────────
+    # 매번 같은 설정을 다시 고르게 하지 않기 위해 Kidsnote_Config.ini의 [Prefs]에 보관한다.
+    def _save_prefs(self):
+        try:
+            if not self.config.has_section('Prefs'):
+                self.config.add_section('Prefs')
+            self.config.set('Prefs', 'save_dir', self.dir_input.text().strip())
+            self.config.set('Prefs', 'period', self.period_combo.currentText())
+            self.config.set('Prefs', 'single_folder', str(self.folder_single_radio.isChecked()))
+            self.config.set('Prefs', 'overwrite_allow', str(self.overwrite_allow_radio.isChecked()))
+            self.config.set('Prefs', 'exclude_video', str(self.chk_exclude_video.isChecked()))
+            if self.both_radio.isChecked():
+                filetype = 'both'
+            elif self.photo_radio.isChecked():
+                filetype = 'photo'
+            else:
+                filetype = 'pdf'
+            self.config.set('Prefs', 'filetype', filetype)
+            with open(self.config_path, 'w') as f:
+                self.config.write(f)
+        except Exception:
+            write_app_log("Prefs save failed:\n" + traceback.format_exc())
+
+    def _restore_prefs(self):
+        """이전 실행에서 쓰던 저장 경로·옵션을 복원 (없으면 기본값 유지)."""
+        try:
+            saved_dir = self.config.get('Prefs', 'save_dir', fallback='').strip()
+            if saved_dir:
+                self.dir_input.setText(saved_dir)
+
+            period = self.config.get('Prefs', 'period', fallback='')
+            if period and self.period_combo.findText(period) >= 0:
+                self.period_combo.setCurrentText(period)
+
+            if self.config.getboolean('Prefs', 'single_folder', fallback=False):
+                self.folder_single_radio.setChecked(True)
+            if not self.config.getboolean('Prefs', 'overwrite_allow', fallback=True):
+                self.overwrite_skip_radio.setChecked(True)
+            if self.config.getboolean('Prefs', 'exclude_video', fallback=False):
+                self.chk_exclude_video.setChecked(True)
+
+            filetype = self.config.get('Prefs', 'filetype', fallback='pdf')
+            if filetype == 'both':
+                self.both_radio.setChecked(True)
+            elif filetype == 'photo':
+                self.photo_radio.setChecked(True)
+        except Exception:
+            write_app_log("Prefs restore failed:\n" + traceback.format_exc())
+
     def _driver_alive(self):
         """브라우저 창이 아직 살아 있는지 확인.
 
@@ -2221,6 +2293,21 @@ class KidsnoteApp(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "경고", "저장 경로를 지정해주세요.")
             return
 
+        # 많이 선택했다면 대략 얼마나 걸리는지 미리 알린다.
+        # (게시물 하나에 상세페이지 열기+로딩으로 대략 6~10초가 걸린다)
+        if len(selected_indices) >= 50:
+            est_min = max(1, int(len(selected_indices) * 8 / 60))
+            reply = self._show_top_question(
+                "시간이 오래 걸릴 수 있습니다",
+                f"{len(selected_indices)}개를 저장하려면 대략 {est_min}분 정도 걸릴 수 있습니다.\n"
+                "(네트워크 속도와 사진 개수에 따라 달라집니다)\n\n"
+                "진행하는 동안 [일시정지]와 [작업 중지]를 쓸 수 있고,\n"
+                "중간에 멈춰도 그때까지 받은 파일은 그대로 남습니다.\n\n"
+                "시작할까요?"
+            )
+            if reply != QtWidgets.QMessageBox.Yes:
+                return
+
         self._launch_download_thread(selected_indices)
 
     def _launch_download_thread(self, selected_indices):
@@ -2277,6 +2364,9 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.update_status(f"다운로드 준비 중... 선택 {len(selected_indices)}개")
 
         is_overwrite_allow = self.overwrite_allow_radio.isChecked()
+
+        # 이번에 쓴 경로·옵션을 다음 실행에서도 그대로 쓰도록 저장
+        self._save_prefs()
 
         write_app_log(
             f"Starting download thread. selected={len(selected_indices)} "
