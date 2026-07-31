@@ -1,4 +1,4 @@
-﻿import sys
+import sys
 import threading
 import os
 import codecs
@@ -593,7 +593,18 @@ class KidsnoteApp(QtWidgets.QWidget):
         import configparser, base64
         self.config = configparser.ConfigParser()
         self.config_path = os.path.join(os.path.expanduser("~"), "Kidsnote_Config.ini")
-        self.config.read(self.config_path)
+        # 설정 파일이 깨져 있어도(BOM 포함/다른 인코딩/손상) 프로그램이 못 뜨는 일은 없어야 한다.
+        # configparser.read()는 기본 로케일 인코딩으로 열기 때문에 BOM 하나만 있어도 예외로 죽는다.
+        for _enc in ("utf-8-sig", "utf-8", None):
+            try:
+                self.config.read(self.config_path, encoding=_enc)
+                break
+            except UnicodeDecodeError:
+                continue
+            except Exception:
+                write_app_log("Config read failed; starting with defaults:\n" + traceback.format_exc())
+                self.config = configparser.ConfigParser()
+                break
         
         saved_id = self.config.get('Login', 'id', fallback='')
         saved_pw_stored = self.config.get('Login', 'pw', fallback='')
@@ -1191,7 +1202,7 @@ class KidsnoteApp(QtWidgets.QWidget):
             self.config.set('Login', 'pw', '')
             self.config.set('Login', 'remember', 'False')
             
-        with open(self.config_path, 'w') as f:
+        with open(self.config_path, 'w', encoding='utf-8') as f:
             self.config.write(f)
 
         self.status_label.setText('브라우저 여는 중 및 로그인 입력 중...')
@@ -1849,7 +1860,7 @@ class KidsnoteApp(QtWidgets.QWidget):
             else:
                 filetype = 'pdf'
             self.config.set('Prefs', 'filetype', filetype)
-            with open(self.config_path, 'w') as f:
+            with open(self.config_path, 'w', encoding='utf-8') as f:
                 self.config.write(f)
         except Exception:
             write_app_log("Prefs save failed:\n" + traceback.format_exc())
