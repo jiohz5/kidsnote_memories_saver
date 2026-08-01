@@ -8,8 +8,8 @@ set "PROJECT_ROOT=C:\edu\samsung-rpa-project-master"
 set "BUILD_PY=%PROJECT_ROOT%\venv_build\Scripts\python.exe"
 set "DRIVER_PATH=%SCRIPT_DIR%msedgedriver.exe"
 if not exist "%DRIVER_PATH%" set "DRIVER_PATH=%PROJECT_ROOT%\msedgedriver.exe"
-set "APP_NAME=Kidsnote_Memories_Saver_V1.05"
-set "ONEDIR_RELEASE=Kidsnote_Release_V1.05"
+set "APP_NAME=Kidsnote_Memories_Saver_V1.06"
+set "ONEDIR_RELEASE=Kidsnote_Release_V1.06"
 
 REM Build mode (default: both)
 REM   both    = single exe + folder zip

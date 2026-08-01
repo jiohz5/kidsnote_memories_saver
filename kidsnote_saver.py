@@ -11,7 +11,7 @@ from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 import kidsnote_engine as manager
 
-APP_VERSION = "1.05"
+APP_VERSION = "1.06"
 UPDATE_CHECK_REPO = "jiohz5/kidsnote_memories_saver"
 # 의견/버그 제보를 받을 곳
 FEEDBACK_URL = f"https://github.com/{UPDATE_CHECK_REPO}/issues/new"
@@ -65,7 +65,7 @@ if hasattr(sys.stderr, 'reconfigure'):
 # Windows에서 파이썬 스크립트 실행 시 작업표시줄 아이콘이 표시되도록 설정 (AppUserModelID 강제 지정)
 try:
     import ctypes
-    myappid = 'kidsnote.memoriessaver.v1.05'
+    myappid = 'kidsnote.memoriessaver.v1.06'
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 except Exception:
     pass
@@ -460,7 +460,7 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.ui_call_signal.emit(callback)
 
     def init_ui(self):
-        self.setWindowTitle('Kidsnote Memories Saver V1.05')
+        self.setWindowTitle('Kidsnote Memories Saver V1.06')
         
         # 사용자의 화면 해상도를 인식하여 기본 스케일 값 도출 (FHD, QHD 등 대응)
         screen = QtWidgets.QApplication.primaryScreen()

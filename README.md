@@ -127,7 +127,6 @@ build_release_v1.bat onedir     # 폴더 zip만
 | `kidsnote_saver.py` | PyQt5 GUI, 다운로드/수집 스레드 |
 | `kidsnote_engine.py` | Selenium 기반 수집·다운로드 엔진 |
 | `build_release_v1.bat` | PyInstaller 배포 빌드 스크립트 |
-| `test_*.py` | 점검용 스크립트 |
 
 ---
 
