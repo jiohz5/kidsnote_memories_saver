@@ -42,3 +42,6 @@ kidsnote_pdf_single_e2e*/
 Thumbs.db
 .vscode/
 .idea/
+
+# 이전 폴더 구조에서 남은 로컬 빌드 잔재 (저장소에 올리지 않음)
+kidsnote_saver_claude/
