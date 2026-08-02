@@ -248,11 +248,43 @@ class DownloadThread(QtCore.QThread):
                 )
 
                 try:
-                    clean_date = re.sub(r'[\\/*?:"<>|]', "", mem.get('date', '')).strip().rstrip('.')
+                    raw_clean_date = re.sub(r'[\\/*?:"<>|]', "", mem.get('date', '')).strip().rstrip('.')
+
+                    # 날짜를 먼저 해석해 두고, 폴더명(YYYYMMDD)과 파일 접두사(YYMMDD)를 함께 만든다.
+                    # 점을 지운 문자열을 다시 파싱하면 '2026.7.4' 같은 경우 자릿수 경계가 모호해지므로
+                    # 파싱은 구분자가 살아 있는 원본으로 한다.
+                    _md = re.search(r'(\d{4})\.?\s*(\d{1,2})\.?\s*(\d{1,2})', raw_clean_date)
+                    _mk = re.search(r'(?:(\d{4})\s*년)?\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일', raw_clean_date)
+                    if _md:
+                        _y, _m, _d = _md.groups()
+                    elif _mk:
+                        _y = _mk.group(1) or datetime.date.today().year
+                        _m, _d = _mk.group(2), _mk.group(3)
+                    else:
+                        _y = _m = _d = None
+
+                    if _y and _m and _d:
+                        clean_date = f"{int(_y):04d}{int(_m):02d}{int(_d):02d}"   # 폴더: 20260714
+                        date_prefix = f"{str(_y)[-2:]}{int(_m):02d}{int(_d):02d}"  # 파일: 260714
+                    else:
+                        clean_date = raw_clean_date.replace('.', '') or raw_clean_date
+                        date_prefix = clean_date
                     item_type = mem.get('type', '항목')
 
                     base_target_dir = os.path.join(self.target_dir, f"{self.profile_name}_{item_type}")
                     os.makedirs(base_target_dir, exist_ok=True)
+
+                    # 예전 버전은 점이 있는 이름(2026.07.14)으로 폴더를 만들었다.
+                    # 같은 날짜가 두 폴더로 갈라지지 않도록, 옛 폴더가 있으면 새 이름으로 넘겨받는다.
+                    if not self.is_single_folder and raw_clean_date != clean_date:
+                        legacy_dir = os.path.join(base_target_dir, raw_clean_date)
+                        new_dir = os.path.join(base_target_dir, clean_date)
+                        if os.path.isdir(legacy_dir) and not os.path.exists(new_dir):
+                            try:
+                                os.rename(legacy_dir, new_dir)
+                                write_app_log(f"Renamed legacy date folder: {raw_clean_date} -> {clean_date}")
+                            except OSError:
+                                pass
 
                     if self.is_stopped:
                         self.status_signal.emit("알림장/앨범 다운로드가 중지되었습니다.")
@@ -268,22 +300,6 @@ class DownloadThread(QtCore.QThread):
                     step_results = []
 
                     if self.want_pdf:
-                        date_prefix = clean_date
-                        dt_match_dot = re.search(r'(\d{4})\.?\s*(\d{1,2})\.?\s*(\d{1,2})', clean_date)
-                        dt_match_kor = re.search(r'(?:(\d{4})\s*년)?\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일', clean_date)
-                        current_year = datetime.date.today().year
-                        if dt_match_dot:
-                            y, m, d = dt_match_dot.groups()
-                        elif dt_match_kor:
-                            y = dt_match_kor.group(1) or current_year
-                            m = dt_match_kor.group(2)
-                            d = dt_match_kor.group(3)
-                        else:
-                            y, m, d = None, None, None
-
-                        if y and m and d:
-                            date_prefix = f"{str(y)[-2:]}{int(m):02d}{int(d):02d}"
-
                         prefix_str = f"{date_prefix}_{item_type}" if post_index == 0 else f"{date_prefix}_{item_type}_{post_index}"
 
                         # 파일명에 제목 일부를 붙여 열어보지 않아도 내용을 알 수 있게 한다

@@ -6,7 +6,7 @@
 ![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
 ![PyQt5](https://img.shields.io/badge/GUI-PyQt5-green.svg)
 ![Edge](https://img.shields.io/badge/Browser-Microsoft%20Edge-informational.svg)
-![License](https://img.shields.io/badge/License-MIT-yellow.svg)
+![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey.svg)
 
 ---
 
@@ -130,9 +130,10 @@ build_release_v1.bat onedir     # 폴더 zip만
 
 ---
 
-## 📜 라이선스 및 안내
-
-MIT License — 자유롭게 사용, 수정, 배포하실 수 있습니다.
+## 📜 이용 안내
 
 > 이 프로그램은 **부모가 본인 계정으로 로그인해 본인 자녀의 기록을 개인 소장용으로 백업**하는 용도로 만들어졌습니다.
 > 상업적 대량 자동화 등 서비스에 부담을 주는 용도로는 사용하지 말아 주세요.
+
+별도의 오픈소스 라이선스를 적용하지 않은 개인 프로젝트입니다.
+코드는 열람·참고하실 수 있으며, 문의나 제안은 [이슈](../../issues)로 남겨주세요.
