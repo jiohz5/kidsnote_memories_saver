@@ -1447,6 +1447,14 @@ class KidsnoteApp(QtWidgets.QWidget):
     def _init_driver(self, username, password):
         try:
             write_app_log("Login/profile initialization started")
+            # 로그인 실패 후 다시 시도하는 경우, 앞서 열어둔 브라우저가 남아 있으면 정리한다.
+            # (그대로 두면 Edge 창과 드라이버 프로세스가 계속 쌓인다)
+            if getattr(self, 'driver', None):
+                try:
+                    self.driver.quit()
+                except Exception:
+                    pass
+                self.driver = None
             from selenium.webdriver.common.by import By
             from selenium.webdriver.support.ui import WebDriverWait
             from selenium.webdriver.support import expected_conditions as EC
@@ -1502,21 +1510,46 @@ class KidsnoteApp(QtWidgets.QWidget):
             user_field.send_keys(username)
             pass_field.send_keys(password)
             pass_field.send_keys(Keys.RETURN) # Auto-submit
-            
+
+            self.update_status("로그인 확인 중...")
+            self._update_overlay_text("🔐 로그인 결과를 확인하는 중입니다...")
+
+            # 로그인 성공 여부를 실제로 확인한다.
+            # (예전에는 무조건 '로그인 성공'이라고 표시해, 비밀번호가 틀려도 계속 진행하다
+            #  나중에 엉뚱한 화면에서 실패하는 바람에 원인을 알 수 없었다)
+            import time
+            login_ok = False
+            try:
+                WebDriverWait(self.driver, 20).until(lambda d: "/login" not in d.current_url)
+                login_ok = True
+            except Exception:
+                login_ok = False
+
+            if not login_ok:
+                write_app_log("Login appears to have failed (still on /login)")
+                self.run_on_ui_thread(self._hide_overlay)
+                self.run_on_ui_thread(lambda: self.login_btn.setText("🔐 키즈노트 로그인 열기"))
+                self.enable_widget(self.login_btn, True)
+                self.update_status("로그인 실패: 아이디 또는 비밀번호를 확인해 주세요.")
+                self.run_on_ui_thread(lambda: self._show_top_message(
+                    QtWidgets.QMessageBox.Warning, "로그인에 실패했습니다",
+                    "아이디 또는 비밀번호가 올바르지 않은 것 같습니다.\n"
+                    "(키즈노트 로그인 화면에서 넘어가지 못했습니다)\n\n"
+                    "① 열려 있는 Edge 창에서 직접 로그인해 보시면 정확한 원인을 알 수 있습니다.\n"
+                    "② 확인이 끝나면 그 Edge 창을 닫아 주세요.\n"
+                    "③ 이 프로그램에 비밀번호를 다시 정확히 입력한 뒤\n"
+                    "    [🔐 키즈노트 로그인 열기]를 다시 눌러 주세요."
+                ))
+                return
+
             self.update_status("안전하게 로그인 되었습니다! 아이 목록을 조회하는 중...")
             self._update_overlay_text("✅ 로그인 성공! 아이 정보를 확인 중입니다...")
             self.run_on_ui_thread(self._hide_lock_overlay)
-            
+
             # 1단계가 열리면 2,3단계를 아직 못 만지게 stage2 잠금 활성화
             self.run_on_ui_thread(self._show_stage2_lock_overlay)
 
             self.run_on_ui_thread(lambda: self.login_btn.setText("✅ 로그인 완료"))
-            # 로그인 처리(URL 전환)가 끝나는 즉시 진행 — 기존 고정 5초/4초 대기 제거
-            import time
-            try:
-                WebDriverWait(self.driver, 12).until(lambda d: "/login" not in d.current_url)
-            except Exception:
-                pass
             if "kidsnote.com/service" not in self.driver.current_url:
                 self.driver.get("https://www.kidsnote.com/service")
             # 프로필 아바타가 렌더링되는 즉시 진행 (최대 10초)
@@ -2022,6 +2055,19 @@ class KidsnoteApp(QtWidgets.QWidget):
 
         # 조회 기간 확정 ('전체'는 필터 없음, 그 외는 날짜칸 기준)
         if self.period_combo.currentText().startswith("전체"):
+            # 전체 기간은 입소 시점까지 모든 페이지를 훑어야 해서 오래 걸린다.
+            # 실수로 고른 채 기다리는 일이 없도록 시작 전에 알린다.
+            reply = self._show_top_question(
+                "전체 기간을 조회합니다",
+                "지금 [전체] 기간이 선택되어 있습니다.\n\n"
+                "아이가 다닌 기간의 알림장·앨범을 모두 훑기 때문에\n"
+                "게시물이 많으면 목록을 불러오는 데만 수 분 이상 걸릴 수 있습니다.\n"
+                "(불러오는 중에도 [작업 중지]로 언제든 멈출 수 있습니다)\n\n"
+                "최근 것만 필요하시면 [최근 1개월] 같은 기간을 고르시는 편이 빠릅니다.\n\n"
+                "전체 기간으로 진행할까요?"
+            )
+            if reply != QtWidgets.QMessageBox.Yes:
+                return
             limit_date_str = None
             end_date_str = None
         else:
