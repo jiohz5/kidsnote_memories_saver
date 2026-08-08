@@ -8,8 +8,8 @@ set "PROJECT_ROOT=C:\edu\samsung-rpa-project-master"
 set "BUILD_PY=%PROJECT_ROOT%\venv_build\Scripts\python.exe"
 set "DRIVER_PATH=%SCRIPT_DIR%msedgedriver.exe"
 if not exist "%DRIVER_PATH%" set "DRIVER_PATH=%PROJECT_ROOT%\msedgedriver.exe"
-set "APP_NAME=Kidsnote_Memories_Saver_V1.06"
-set "ONEDIR_RELEASE=Kidsnote_Release_V1.06"
+set "APP_NAME=Kidsnote_Memories_Saver_V1.07"
+set "ONEDIR_RELEASE=Kidsnote_Release_V1.07"
 
 REM Build mode (default: both)
 REM   both    = single exe + folder zip
@@ -38,13 +38,15 @@ REM The driver shipped inside the release only works offline while its major
 REM version matches the user's Edge. If it falls behind, every launch quietly
 REM falls back to downloading a driver, which is exactly what breaks on
 REM locked-down networks. Warn before a release is built with a stale driver.
+REM --update: 뒤처졌으면 최신 드라이버를 받아 자동으로 교체한다.
 echo 0. Checking bundled Edge WebDriver version...
-"%BUILD_PY%" "%SCRIPT_DIR%check_driver.py" "%DRIVER_PATH%"
+"%BUILD_PY%" "%SCRIPT_DIR%check_driver.py" "%DRIVER_PATH%" --update
 if errorlevel 1 (
     echo.
-    choice /C YN /N /M "Build anyway with this driver? [Y/N] "
+    echo WARNING: could not bring the bundled driver up to date.
+    choice /C YN /N /M "Build anyway with the current driver? [Y/N] "
     if errorlevel 2 (
-        echo Build cancelled. See RELEASE_CHECKLIST.md for how to update the driver.
+        echo Build cancelled. See RELEASE_CHECKLIST.md for the manual steps.
         exit /b 1
     )
 )
