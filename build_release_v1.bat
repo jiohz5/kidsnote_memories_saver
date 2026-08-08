@@ -33,6 +33,23 @@ if not exist "%DRIVER_PATH%" (
     exit /b 1
 )
 
+REM ---- Bundled Edge WebDriver freshness check -------------------------------
+REM The driver shipped inside the release only works offline while its major
+REM version matches the user's Edge. If it falls behind, every launch quietly
+REM falls back to downloading a driver, which is exactly what breaks on
+REM locked-down networks. Warn before a release is built with a stale driver.
+echo 0. Checking bundled Edge WebDriver version...
+"%BUILD_PY%" "%SCRIPT_DIR%check_driver.py" "%DRIVER_PATH%"
+if errorlevel 1 (
+    echo.
+    choice /C YN /N /M "Build anyway with this driver? [Y/N] "
+    if errorlevel 2 (
+        echo Build cancelled. See RELEASE_CHECKLIST.md for how to update the driver.
+        exit /b 1
+    )
+)
+echo.
+
 if /I "%BUILD_MODE%"=="both" goto build_both
 
 call :build_one %BUILD_MODE%
