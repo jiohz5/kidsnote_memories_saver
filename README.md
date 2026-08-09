@@ -19,6 +19,16 @@
 
 ---
 
+## 🖼️ 화면 미리보기
+
+| 1. 로그인 | 2. 추억 목록 불러오기 |
+|:---:|:---:|
+| ![로그인 화면](docs/screenshots/01-login.png) | ![목록 불러오기](docs/screenshots/02-list.png) |
+| **3. 다운로드 설정 / 진행** | **4. 저장된 결과** |
+| ![다운로드](docs/screenshots/03-download.png) | ![결과 폴더](docs/screenshots/04-result.png) |
+
+---
+
 ## ✨ 주요 기능
 
 - 📋 **알림장 저장** — 댓글까지 포함된 전체 화면을 PDF로 보존
