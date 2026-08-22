@@ -6,7 +6,7 @@ import datetime
 import faulthandler
 import traceback
 import shutil
-from PyQt5 import QtWidgets, QtCore, QtGui
+from PyQt6 import QtWidgets, QtCore, QtGui
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 import kidsnote_engine as manager
@@ -140,10 +140,20 @@ class CheckStateItem(QtWidgets.QTableWidgetItem):
     '선택' 컬럼을 셀 위젯(QCheckBox) 대신 체크형 아이템으로 만들어
     헤더 클릭 정렬 시 체크 상태가 데이터 행과 함께 이동하도록 한다.
     """
+    @staticmethod
+    def _check_rank(item):
+        """체크 상태를 정렬용 숫자로 변환.
+
+        PyQt6의 열거형은 파이썬 Enum이라 int()로 바꿀 수 없다(Qt5에서는 가능했다).
+        .value를 우선 쓰고, 없으면 int로 폴백해 두 버전 모두에서 동작하게 한다.
+        """
+        state = item.checkState()
+        return getattr(state, 'value', None) if hasattr(state, 'value') else int(state)
+
     def __lt__(self, other):
         if isinstance(other, QtWidgets.QTableWidgetItem):
             try:
-                return int(self.checkState()) < int(other.checkState())
+                return self._check_rank(self) < self._check_rank(other)
             except Exception:
                 pass
         return super().__lt__(other)
@@ -459,7 +469,7 @@ class KidsnoteApp(QtWidgets.QWidget):
                 self.run_on_ui_thread(lambda: self.tray_icon.showMessage(
                     "업데이트 안내",
                     f"새 버전 {tag} 이(가) 공개되었습니다. 블로그/GitHub에서 받아주세요.",
-                    QtWidgets.QSystemTrayIcon.Information,
+                    QtWidgets.QSystemTrayIcon.MessageIcon.Information,
                     8000,
                 ))
         except Exception:
@@ -651,7 +661,7 @@ class KidsnoteApp(QtWidgets.QWidget):
         pw_layout = QtWidgets.QHBoxLayout()
         pw_layout.addWidget(QtWidgets.QLabel("비밀번호:"))
         self.pw_input = QtWidgets.QLineEdit(saved_pw)
-        self.pw_input.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.pw_input.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
         self.pw_input.setMinimumWidth(FS(140))
         self.pw_input.setMaximumWidth(FS(180))
         pw_layout.addWidget(self.pw_input)
@@ -702,7 +712,7 @@ class KidsnoteApp(QtWidgets.QWidget):
         status_area_layout.setSpacing(FS(5))
 
         self.status_label = QtWidgets.QLabel('준비됨')
-        self.status_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.status_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.status_label.setStyleSheet(f"font-weight: bold; color: white; background-color: #03A9F4; font-size: {FS(16)}px; padding: {FS(8)}px; border-radius: {S(5)}px;")
         status_area_layout.addWidget(self.status_label)
 
@@ -763,16 +773,16 @@ class KidsnoteApp(QtWidgets.QWidget):
 
         # 왼쪽: 아이 현황 (프로필 이미지, 라벨, 콤보박스)
         left_layout = QtWidgets.QVBoxLayout()
-        left_layout.setAlignment(QtCore.Qt.AlignCenter)
+        left_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         left_layout.setSpacing(FS(5))
         
         # Profile Image Label
         self.profile_img_label = QtWidgets.QLabel()
         self.profile_img_label.setFixedSize(FS(96), FS(96))
         self.profile_img_label.setStyleSheet(f"border-radius: {FS(48)}px; background-color: #E2E8F0;")
-        self.profile_img_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.profile_img_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.profile_img_label.setText("사진")
-        left_layout.addWidget(self.profile_img_label, alignment=QtCore.Qt.AlignCenter)
+        left_layout.addWidget(self.profile_img_label, alignment=QtCore.Qt.AlignmentFlag.AlignCenter)
 
         
         # Child Combobox
@@ -789,7 +799,7 @@ class KidsnoteApp(QtWidgets.QWidget):
 
         # 수집 중 상태 안내 배너 (기본 숨김)
         self.loading_banner = QtWidgets.QLabel("⏳ 추억 목록을 불러오는 중입니다... 잠시 기다려 주세요.")
-        self.loading_banner.setAlignment(QtCore.Qt.AlignCenter)
+        self.loading_banner.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.loading_banner.setStyleSheet(f"""
             background-color: #FFF3CD; color: #856404; font-weight: bold; 
             font-size: {FS(13)}px; padding: {S(5)}px; border-radius: {S(5)}px; border: {S(1)}px solid #FCEEBB;
@@ -801,7 +811,7 @@ class KidsnoteApp(QtWidgets.QWidget):
 
         # 체크박스 (알림장/앨범)
         chk_layout = QtWidgets.QVBoxLayout()
-        chk_layout.setAlignment(QtCore.Qt.AlignVCenter)
+        chk_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignVCenter)
         chk_layout.setSpacing(FS(5))
         self.chk_report = QtWidgets.QCheckBox("알림장")
         self.chk_report.setChecked(True)
@@ -876,8 +886,8 @@ class KidsnoteApp(QtWidgets.QWidget):
         collect_main_layout.addLayout(left_layout, stretch=1)
         
         v_line = QtWidgets.QFrame()
-        v_line.setFrameShape(QtWidgets.QFrame.VLine)
-        v_line.setFrameShadow(QtWidgets.QFrame.Sunken)
+        v_line.setFrameShape(QtWidgets.QFrame.Shape.VLine)
+        v_line.setFrameShadow(QtWidgets.QFrame.Shadow.Sunken)
         v_line.setStyleSheet("border: 1px solid #E2E8F0;")
         collect_main_layout.addWidget(v_line)
         
@@ -920,8 +930,8 @@ class KidsnoteApp(QtWidgets.QWidget):
         # 테이블의 기본 높이를 확 줄여서(250), 초기 빈 상태에선 앱 중앙 스크롤이 생기지 않도록 방지
         self.table.setMinimumHeight(FS(250))
         self.table.setHorizontalHeaderLabels(['선택', '날짜', '제목', '종류', '작성자', '사진', '백업'])
-        self.table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.Fixed)
-        self.table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Fixed)
+        self.table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Stretch)
         self.table.setColumnWidth(0, FS(40))
         self.table.setColumnWidth(1, FS(110))  # 날짜: "2026.01.26"
         self.table.setColumnWidth(3, FS(70))   # 종류: 알림장/앨범
@@ -1078,7 +1088,7 @@ class KidsnoteApp(QtWidgets.QWidget):
         self._overlay = QtWidgets.QWidget(self)
         self._overlay.setStyleSheet("background-color: rgba(0, 0, 0, 160);")
         self._overlay_label = QtWidgets.QLabel("잠시만 기다려 주세요...", self._overlay)
-        self._overlay_label.setAlignment(QtCore.Qt.AlignCenter)
+        self._overlay_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self._overlay_label.setStyleSheet(f"""
             color: white;
             font-size: {FS(18)}px;
@@ -1097,7 +1107,7 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.lock_overlay = QtWidgets.QWidget(self)
         self.lock_overlay.setStyleSheet("background-color: rgba(240, 240, 240, 200);")
         lock_label = QtWidgets.QLabel("위에서 '키즈노트 로그인 열기'를 먼저 완료해 주세요", self.lock_overlay)
-        lock_label.setAlignment(QtCore.Qt.AlignCenter)
+        lock_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         lock_label.setStyleSheet(f"color: #2D3748; font-size: {FS(18)}px; font-weight: bold; background: transparent;")
         lock_layout = QtWidgets.QVBoxLayout(self.lock_overlay)
         lock_layout.addWidget(lock_label)
@@ -1108,7 +1118,7 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.stage2_lock_overlay = QtWidgets.QWidget(self)
         self.stage2_lock_overlay.setStyleSheet("background-color: rgba(240, 240, 240, 210);")
         stage2_lock_label = QtWidgets.QLabel("먼저 1단계에서 [추억 목록 불러오기]를 진행해 주세요", self.stage2_lock_overlay)
-        stage2_lock_label.setAlignment(QtCore.Qt.AlignCenter)
+        stage2_lock_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         stage2_lock_label.setStyleSheet(f"color: #2D3748; font-size: {FS(18)}px; font-weight: bold; background: transparent;")
         stage2_lock_layout = QtWidgets.QVBoxLayout(self.stage2_lock_overlay)
         stage2_lock_layout.addWidget(stage2_lock_label)
@@ -1532,7 +1542,7 @@ class KidsnoteApp(QtWidgets.QWidget):
                 self.enable_widget(self.login_btn, True)
                 self.update_status("로그인 실패: 아이디 또는 비밀번호를 확인해 주세요.")
                 self.run_on_ui_thread(lambda: self._show_top_message(
-                    QtWidgets.QMessageBox.Warning, "로그인에 실패했습니다",
+                    QtWidgets.QMessageBox.Icon.Warning, "로그인에 실패했습니다",
                     "아이디 또는 비밀번호가 올바르지 않은 것 같습니다.\n"
                     "(키즈노트 로그인 화면에서 넘어가지 못했습니다)\n\n"
                     "① 열려 있는 Edge 창에서 직접 로그인해 보시면 정확한 원인을 알 수 있습니다.\n"
@@ -1804,7 +1814,7 @@ class KidsnoteApp(QtWidgets.QWidget):
                 self.stage2_lock_overlay.show()
                 self.stage2_lock_overlay.raise_()
             self._show_top_message(
-                QtWidgets.QMessageBox.Information, "목록을 다시 불러와 주세요",
+                QtWidgets.QMessageBox.Icon.Information, "목록을 다시 불러와 주세요",
                 f"[{combo_text}] (으)로 전환했습니다.\n\n"
                 "이전 아이의 목록은 초기화했습니다. "
                 "[추억 목록 불러오기]를 다시 눌러 주세요."
@@ -1880,27 +1890,27 @@ class KidsnoteApp(QtWidgets.QWidget):
         box.setIcon(icon)
         box.setWindowTitle(title)
         box.setText(text)
-        box.setStandardButtons(QtWidgets.QMessageBox.Ok)
-        box.setWindowModality(QtCore.Qt.ApplicationModal)
-        box.setWindowFlag(QtCore.Qt.WindowStaysOnTopHint, True)
+        box.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Ok)
+        box.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
+        box.setWindowFlag(QtCore.Qt.WindowType.WindowStaysOnTopHint, True)
         box.show()
         box.raise_()
         box.activateWindow()
-        return box.exec_()
+        return box.exec()
 
-    def _show_top_question(self, title, text, default_button=QtWidgets.QMessageBox.Yes):
+    def _show_top_question(self, title, text, default_button=QtWidgets.QMessageBox.StandardButton.Yes):
         box = QtWidgets.QMessageBox(self)
-        box.setIcon(QtWidgets.QMessageBox.Question)
+        box.setIcon(QtWidgets.QMessageBox.Icon.Question)
         box.setWindowTitle(title)
         box.setText(text)
-        box.setStandardButtons(QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
+        box.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No)
         box.setDefaultButton(default_button)
-        box.setWindowModality(QtCore.Qt.ApplicationModal)
-        box.setWindowFlag(QtCore.Qt.WindowStaysOnTopHint, True)
+        box.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
+        box.setWindowFlag(QtCore.Qt.WindowType.WindowStaysOnTopHint, True)
         box.show()
         box.raise_()
         box.activateWindow()
-        return box.exec_()
+        return box.exec()
 
     # ── 사용자 선택 기억 (저장 경로·다운로드 옵션) ──────────────────────────
     # 매번 같은 설정을 다시 고르게 하지 않기 위해 Kidsnote_Config.ini의 [Prefs]에 보관한다.
@@ -1988,7 +1998,7 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.login_btn.setText("1. 키즈노트 로그인 열기")
         self.update_status("브라우저 연결이 끊어졌습니다. 다시 로그인해 주세요.")
         self._show_top_message(
-            QtWidgets.QMessageBox.Warning, "브라우저 연결 끊김",
+            QtWidgets.QMessageBox.Icon.Warning, "브라우저 연결 끊김",
             "키즈노트 브라우저 창이 닫혀 있어 " + action_name + "을(를) 계속할 수 없습니다.\n\n"
             "브라우저 창을 직접 닫으셨다면 [1. 키즈노트 로그인 열기]로 다시 시작해 주세요.\n"
             "(이미 받은 파일은 그대로 보존됩니다.)"
@@ -2066,7 +2076,7 @@ class KidsnoteApp(QtWidgets.QWidget):
                 "최근 것만 필요하시면 [최근 1개월] 같은 기간을 고르시는 편이 빠릅니다.\n\n"
                 "전체 기간으로 진행할까요?"
             )
-            if reply != QtWidgets.QMessageBox.Yes:
+            if reply != QtWidgets.QMessageBox.StandardButton.Yes:
                 return
             limit_date_str = None
             end_date_str = None
@@ -2121,7 +2131,7 @@ class KidsnoteApp(QtWidgets.QWidget):
                     continue
                 chk_item = self.table.item(i, 0)
                 if chk_item:
-                    chk_item.setCheckState(QtCore.Qt.Checked if decide_checked(i) else QtCore.Qt.Unchecked)
+                    chk_item.setCheckState(QtCore.Qt.CheckState.Checked if decide_checked(i) else QtCore.Qt.CheckState.Unchecked)
         finally:
             self.table.blockSignals(False)
         self.update_selection_label()
@@ -2136,7 +2146,7 @@ class KidsnoteApp(QtWidgets.QWidget):
         """증분 백업: 이 PC에서 아직 받은 적 없는 항목만 체크."""
         def is_new(i):
             title_item = self.table.item(i, 2)
-            idx = title_item.data(QtCore.Qt.UserRole) if title_item else None
+            idx = title_item.data(QtCore.Qt.ItemDataRole.UserRole) if title_item else None
             if idx is not None and 0 <= idx < len(self.memories):
                 return self.memories[idx].get('id') not in self.downloaded_ids
             return True
@@ -2148,7 +2158,7 @@ class KidsnoteApp(QtWidgets.QWidget):
             title_item = self.table.item(i, 2)
             if not title_item:
                 continue
-            idx = title_item.data(QtCore.Qt.UserRole)
+            idx = title_item.data(QtCore.Qt.ItemDataRole.UserRole)
             if idx is None or not (0 <= idx < len(self.memories)):
                 continue
             mark = "O" if self.memories[idx].get('id') in self.downloaded_ids else ""
@@ -2177,7 +2187,7 @@ class KidsnoteApp(QtWidgets.QWidget):
             if not self.table.isRowHidden(i):
                 total += 1
                 chk_item = self.table.item(i, 0)
-                if chk_item and chk_item.checkState() == QtCore.Qt.Checked:
+                if chk_item and chk_item.checkState() == QtCore.Qt.CheckState.Checked:
                     selected += 1
         self.selection_label.setText(f"선택됨: {selected} / 표시됨: {total}")
 
@@ -2210,15 +2220,15 @@ class KidsnoteApp(QtWidgets.QWidget):
 
         # 체크박스: 셀 위젯 대신 체크형 아이템 — 헤더 정렬 시 체크 상태가 행과 함께 이동
         chk_item = CheckStateItem()
-        chk_item.setFlags(QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable)
-        chk_item.setCheckState(QtCore.Qt.Checked)
-        chk_item.setTextAlignment(QtCore.Qt.AlignCenter)
+        chk_item.setFlags(QtCore.Qt.ItemFlag.ItemIsUserCheckable | QtCore.Qt.ItemFlag.ItemIsEnabled | QtCore.Qt.ItemFlag.ItemIsSelectable)
+        chk_item.setCheckState(QtCore.Qt.CheckState.Checked)
+        chk_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.table.setItem(i, 0, chk_item)
 
         self.table.setItem(i, 1, QtWidgets.QTableWidgetItem(mem['date']))
         
         title_item = QtWidgets.QTableWidgetItem(mem['title'])
-        title_item.setData(QtCore.Qt.UserRole, len(self.memories) - 1)
+        title_item.setData(QtCore.Qt.ItemDataRole.UserRole, len(self.memories) - 1)
         self.table.setItem(i, 2, title_item)
         
         self.table.setItem(i, 3, QtWidgets.QTableWidgetItem(mem['type']))
@@ -2261,7 +2271,7 @@ class KidsnoteApp(QtWidgets.QWidget):
             if self.scrape_thread.is_stopped:
                 msg = "수집이 중지되었습니다. 가져온 항목이 없습니다."
                 self.update_status(msg)
-                self._show_top_message(QtWidgets.QMessageBox.Information, "중단됨", msg)
+                self._show_top_message(QtWidgets.QMessageBox.Icon.Information, "중단됨", msg)
                 return
 
             # 진단 정보로 '정상 조회했으나 0건'과 '조회 자체 실패'를 구분해 안내
@@ -2284,7 +2294,7 @@ class KidsnoteApp(QtWidgets.QWidget):
                     "잠시 후 [목록 불러오기]를 다시 시도해 주세요."
                 )
                 self.update_status("조회 실패: 키즈노트 웹사이트 자체 오류")
-                self._show_top_message(QtWidgets.QMessageBox.Warning, "키즈노트 자체 오류", msg)
+                self._show_top_message(QtWidgets.QMessageBox.Icon.Warning, "키즈노트 자체 오류", msg)
             elif info.get('filtered_out', 0) > 0:
                 # 목록은 정상적으로 열렸고 게시물도 있었지만, 전부 조회 기간 범위 밖
                 msg = (
@@ -2293,7 +2303,7 @@ class KidsnoteApp(QtWidgets.QWidget):
                     f"조회 기간을 조정한 뒤 다시 시도해 보세요."
                 )
                 self.update_status(f"조회 완료: [{period_text}] 기간 내 게시물 0건")
-                self._show_top_message(QtWidgets.QMessageBox.Information, "기간 내 게시물 없음", msg)
+                self._show_top_message(QtWidgets.QMessageBox.Icon.Information, "기간 내 게시물 없음", msg)
             elif info.get('selector_broken'):
                 # 화면에는 내용이 있는데 게시물을 하나도 인식하지 못함 → 키즈노트 화면 개편 가능성
                 msg = (
@@ -2304,7 +2314,7 @@ class KidsnoteApp(QtWidgets.QWidget):
                     "최신 버전인데도 같은 증상이면 [🔧 진단정보 복사] 후 이슈로 남겨주시면 반영하겠습니다."
                 )
                 self.update_status("조회 실패: 키즈노트 화면 구성 변경 의심 (업데이트 필요)")
-                self._show_top_message(QtWidgets.QMessageBox.Warning, "화면 구성이 바뀐 것 같습니다", msg)
+                self._show_top_message(QtWidgets.QMessageBox.Icon.Warning, "화면 구성이 바뀐 것 같습니다", msg)
             elif info.get('list_loaded') and info.get('items_seen', 0) == 0:
                 # 목록 화면은 열렸지만 게시물 자체가 하나도 없음 (신규 계정 등)
                 msg = (
@@ -2312,7 +2322,7 @@ class KidsnoteApp(QtWidgets.QWidget):
                     "선택한 아이가 맞는지, 알림장/앨범 체크 항목이 맞는지 확인해 주세요."
                 )
                 self.update_status("조회 완료: 게시물 0건")
-                self._show_top_message(QtWidgets.QMessageBox.Information, "게시물 없음", msg)
+                self._show_top_message(QtWidgets.QMessageBox.Icon.Information, "게시물 없음", msg)
             else:
                 # 목록 화면 진입 실패 또는 게시물 로딩 타임아웃 → 네트워크/일시 장애 안내
                 msg = (
@@ -2322,13 +2332,13 @@ class KidsnoteApp(QtWidgets.QWidget):
                     "(캐시가 쌓여 두 세번째 시도 땐 더 빠릅니다!)"
                 )
                 self.update_status("수집 실패: 목록 페이지 로딩 시간 초과")
-                self._show_top_message(QtWidgets.QMessageBox.Warning, "목록 가져오기 실패", msg)
+                self._show_top_message(QtWidgets.QMessageBox.Icon.Warning, "목록 가져오기 실패", msg)
             return
 
         if self.scrape_thread.is_stopped:
             msg = f"목록 로드 중지됨: {len(self.memories)}개 수집 완료"
             self.update_status(msg)
-            self._show_top_message(QtWidgets.QMessageBox.Information, "불러오기 완료", msg)
+            self._show_top_message(QtWidgets.QMessageBox.Icon.Information, "불러오기 완료", msg)
         else:
             msg = f"목록 로드 완료: {len(self.memories)}개 수집 완료"
             # 알려진 화면 구조로는 못 찾고 예비 방식으로 찾아낸 경우 — 동작은 했지만 업데이트를 권한다
@@ -2340,7 +2350,7 @@ class KidsnoteApp(QtWidgets.QWidget):
                 )
             self.update_status(msg.split("\n")[0])
             self.update_progress(100)
-            self._show_top_message(QtWidgets.QMessageBox.Information, "불러오기 완료", msg)
+            self._show_top_message(QtWidgets.QMessageBox.Icon.Information, "불러오기 완료", msg)
 
     @QtCore.pyqtSlot()
     def _ensure_load_finished(self):
@@ -2360,11 +2370,11 @@ class KidsnoteApp(QtWidgets.QWidget):
         selected_indices = []
         for i in range(self.table.rowCount()):
             chk_item = self.table.item(i, 0)
-            if not chk_item or chk_item.checkState() != QtCore.Qt.Checked:
+            if not chk_item or chk_item.checkState() != QtCore.Qt.CheckState.Checked:
                 continue
             index_item = self.table.item(i, 2)
             if index_item:
-                orig_idx = index_item.data(QtCore.Qt.UserRole)
+                orig_idx = index_item.data(QtCore.Qt.ItemDataRole.UserRole)
                 if orig_idx is not None:
                     selected_indices.append(orig_idx)
         
@@ -2389,7 +2399,7 @@ class KidsnoteApp(QtWidgets.QWidget):
                 "중간에 멈춰도 그때까지 받은 파일은 그대로 남습니다.\n\n"
                 "시작할까요?"
             )
-            if reply != QtWidgets.QMessageBox.Yes:
+            if reply != QtWidgets.QMessageBox.StandardButton.Yes:
                 return
 
         self._launch_download_thread(selected_indices)
@@ -2503,7 +2513,7 @@ class KidsnoteApp(QtWidgets.QWidget):
                 "실패 항목 재시도",
                 f"다운로드에 실패한 {len(failed)}건이 있습니다.\n실패한 항목만 다시 시도할까요?"
             )
-            if reply == QtWidgets.QMessageBox.Yes:
+            if reply == QtWidgets.QMessageBox.StandardButton.Yes:
                 self._launch_download_thread(failed)
 
     @QtCore.pyqtSlot()
@@ -2519,7 +2529,7 @@ class KidsnoteApp(QtWidgets.QWidget):
             self.update_status("다운로드가 비정상 종료되었습니다. 로그를 확인해 주세요.")
 
     def _show_download_complete(self, target_dir, success_cnt, fail_cnt, is_stopped, elapsed_sec=0):
-        self.tray_icon.showMessage("키즈노트 다운로더", f"다운로드 완료 (성공: {success_cnt}, 실패/건너뜀: {fail_cnt})", QtWidgets.QSystemTrayIcon.Information, 5000)
+        self.tray_icon.showMessage("키즈노트 다운로더", f"다운로드 완료 (성공: {success_cnt}, 실패/건너뜀: {fail_cnt})", QtWidgets.QSystemTrayIcon.MessageIcon.Information, 5000)
 
         status_msg = f"총 {success_cnt+fail_cnt}개 중 성공: {success_cnt}건, 실패/건너뜀: {fail_cnt}건\n"
         if elapsed_sec:
@@ -2541,7 +2551,7 @@ class KidsnoteApp(QtWidgets.QWidget):
 
         reply = self._show_top_question("다운로드 완료", status_msg + "\n지금 폴더를 열어보시겠습니까?")
         
-        if reply == QtWidgets.QMessageBox.Yes:
+        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
             import os
             if os.path.exists(target_dir):
                 os.startfile(target_dir)
@@ -2553,7 +2563,7 @@ class KidsnoteApp(QtWidgets.QWidget):
         
         if img_b64:
             import base64
-            from PyQt5 import QtGui, QtCore
+            from PyQt6 import QtGui, QtCore
             
             raw_data = base64.b64decode(img_b64.encode('utf-8'))
             
@@ -2579,15 +2589,15 @@ class KidsnoteApp(QtWidgets.QWidget):
             physical_size = QtCore.QSize(int(size.width() * dpr), int(size.height() * dpr))
             rounded = QtGui.QPixmap(physical_size)
             rounded.setDevicePixelRatio(dpr)
-            rounded.fill(QtCore.Qt.transparent)
+            rounded.fill(QtCore.Qt.GlobalColor.transparent)
             
             painter = QtGui.QPainter(rounded)
-            painter.setRenderHint(QtGui.QPainter.Antialiasing)
-            scaled_profile = pixmap.scaled(physical_size, QtCore.Qt.KeepAspectRatioByExpanding, QtCore.Qt.SmoothTransformation)
+            painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            scaled_profile = pixmap.scaled(physical_size, QtCore.Qt.AspectRatioMode.KeepAspectRatioByExpanding, QtCore.Qt.TransformationMode.SmoothTransformation)
             scaled_profile.setDevicePixelRatio(dpr)
             brush = QtGui.QBrush(scaled_profile)
             painter.setBrush(brush)
-            painter.setPen(QtCore.Qt.NoPen)
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
             painter.drawEllipse(0, 0, size.width(), size.height())
             painter.end()
             
@@ -2610,8 +2620,8 @@ class KidsnoteApp(QtWidgets.QWidget):
             fs = getattr(self, '_FS', lambda v: v)   # FS는 init_ui 지역 함수라 보관해 둔 것을 쓴다
             metrics = QtGui.QFontMetrics(self.status_label.font())
             avail = max(fs(60), self.status_label.width() - fs(20))
-            self.status_label.setText(metrics.elidedText(msg, QtCore.Qt.ElideRight, avail))
-            self.status_label.setToolTip(msg if metrics.width(msg) > avail else "")
+            self.status_label.setText(metrics.elidedText(msg, QtCore.Qt.TextElideMode.ElideRight, avail))
+            self.status_label.setToolTip(msg if metrics.horizontalAdvance(msg) > avail else "")
         except Exception:
             write_app_log("Status elide failed:\n" + traceback.format_exc())
             self.status_label.setText(msg)
@@ -2629,7 +2639,7 @@ class KidsnoteApp(QtWidgets.QWidget):
             "문제 상황을 알려주실 때 붙여넣으면 원인 파악이 훨씬 빨라집니다.\n\n"
             "⚠ 공개되는 페이지이므로 아이 이름·사진은 넣지 말아 주세요."
         )
-        if reply == QtWidgets.QMessageBox.Yes:
+        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
             self.copy_diagnostics()
 
         template = (
@@ -2649,7 +2659,7 @@ class KidsnoteApp(QtWidgets.QWidget):
         except Exception:
             write_app_log("Feedback page open failed:\n" + traceback.format_exc())
             self._show_top_message(
-                QtWidgets.QMessageBox.Warning, "페이지를 열지 못했습니다",
+                QtWidgets.QMessageBox.Icon.Warning, "페이지를 열지 못했습니다",
                 "브라우저를 여는 데 실패했습니다. 아래 주소로 직접 접속해 주세요.\n\n" + FEEDBACK_URL
             )
 
@@ -2660,7 +2670,7 @@ class KidsnoteApp(QtWidgets.QWidget):
             webbrowser.open(DONATION_URL)
         except Exception:
             self._show_top_message(
-                QtWidgets.QMessageBox.Warning, "페이지를 열지 못했습니다",
+                QtWidgets.QMessageBox.Icon.Warning, "페이지를 열지 못했습니다",
                 "아래 주소로 직접 접속해 주세요.\n\n" + DONATION_URL
             )
 
@@ -2692,7 +2702,7 @@ class KidsnoteApp(QtWidgets.QWidget):
 
         QtWidgets.QApplication.clipboard().setText(text)
         self._show_top_message(
-            QtWidgets.QMessageBox.Information,
+            QtWidgets.QMessageBox.Icon.Information,
             "진단정보 복사 완료",
             f"진단정보 {len(lines)}줄을 클립보드에 복사했습니다.\n\n"
             f"채팅창에 그대로 붙여넣기(Ctrl+V) 해서 전달해 주세요.\n\n로그 폴더:\n{_app_log_dir()}",
@@ -2764,14 +2774,10 @@ class KidsnoteApp(QtWidgets.QWidget):
 
 if __name__ == '__main__':
     install_crash_logging()
-    # 4K 모니터 등 고해상도(High DPI) 디스플레이에서 GUI 텍스트와 UI가 극단적으로 작아지는 현상 방지
-    if hasattr(QtCore.Qt, 'AA_EnableHighDpiScaling'):
-        QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
-    if hasattr(QtCore.Qt, 'AA_UseHighDpiPixmaps'):
-        QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
-        
+    # Qt6는 High DPI 스케일링이 항상 켜져 있어 별도 설정이 필요 없다.
+    # (Qt5에서 쓰던 AA_EnableHighDpiScaling / AA_UseHighDpiPixmaps 는 Qt6에서 제거됨)
     app = QtWidgets.QApplication(sys.argv)
     ex = KidsnoteApp()
     app.aboutToQuit.connect(ex.cleanup_browser_processes)
     ex.show()
-    sys.exit(app.exec_())
+    sys.exit(app.exec())

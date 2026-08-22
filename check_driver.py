@@ -96,7 +96,19 @@ def update_driver(driver_path, version):
     return True
 
 
+def print_dll_dir():
+    """이 파이썬이 의존하는 DLL 폴더(anaconda의 Library/bin)를 출력한다.
+
+    PyInstaller가 _ssl / _lzma / _ctypes 의 의존 DLL을 찾지 못하면 빌드는 성공해도
+    실행 시 'DLL load failed' 로 죽는다. 빌드 스크립트가 이 경로를 PATH에 넣는다.
+    """
+    print(os.path.join(sys.base_prefix, "Library", "bin"))
+    return 0
+
+
 def main():
+    if "--print-dll-dir" in sys.argv:
+        return print_dll_dir()
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     do_update = "--update" in sys.argv
     driver_path = args[0] if args else "msedgedriver.exe"

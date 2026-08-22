@@ -33,6 +33,16 @@ if not exist "%DRIVER_PATH%" (
     exit /b 1
 )
 
+REM ---- DLL search path -------------------------------------------------------
+REM anaconda 기반 파이썬은 _ssl / _lzma / _ctypes 가 Libraryin 의 DLL에 의존한다.
+REM 그 경로가 PATH에 없으면 PyInstaller가 DLL을 못 찾아, 빌드는 성공해도 실행 시
+REM "DLL load failed while importing _ssl" 로 죽는다. 빌드 파이썬 기준으로 직접 잡아준다.
+"%BUILD_PY%" "%SCRIPT_DIR%check_driver.py" --print-dll-dir > "%TEMP%\_kn_dlldir.txt" 2>nul
+set "PY_DLL_DIR="
+if exist "%TEMP%\_kn_dlldir.txt" set /p PY_DLL_DIR=<"%TEMP%\_kn_dlldir.txt"
+if defined PY_DLL_DIR if exist "%PY_DLL_DIR%" set "PATH=%PY_DLL_DIR%;%PATH%"
+del "%TEMP%\_kn_dlldir.txt" >nul 2>&1
+
 REM ---- Bundled Edge WebDriver freshness check -------------------------------
 REM The driver shipped inside the release only works offline while its major
 REM version matches the user's Edge. If it falls behind, every launch quietly
@@ -87,7 +97,7 @@ if exist "%APP_NAME%.spec" del /q "%APP_NAME%.spec"
 echo [%MODE%] 2. Building with PyInstaller...
 REM kidsnote_engine.py is bundled as bytecode via import, so the plain
 REM .py source is intentionally NOT shipped with --add-data.
-"%BUILD_PY%" -m PyInstaller --noconfirm %MODE_FLAG% --windowed --hidden-import selenium --hidden-import requests --collect-all selenium --collect-all PIL --add-binary "%DRIVER_PATH%;." --add-data "%SCRIPT_DIR%kidsnote_icon.ico;." --name "%APP_NAME%" --icon "%SCRIPT_DIR%kidsnote_icon.ico" "%SCRIPT_DIR%kidsnote_saver.py"
+"%BUILD_PY%" -m PyInstaller --noconfirm %MODE_FLAG% --windowed --exclude-module PyQt5 --hidden-import selenium --hidden-import requests --collect-all selenium --collect-all PIL --add-binary "%DRIVER_PATH%;." --add-data "%SCRIPT_DIR%kidsnote_icon.ico;." --name "%APP_NAME%" --icon "%SCRIPT_DIR%kidsnote_icon.ico" "%SCRIPT_DIR%kidsnote_saver.py"
 if errorlevel 1 (
     echo ERROR: PyInstaller build failed [%MODE%]
     exit /b 1
