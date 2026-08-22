@@ -819,7 +819,7 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.chk_album.setChecked(True)
         chk_layout.addWidget(self.chk_report)
         chk_layout.addWidget(self.chk_album)
-        btn_layout.addLayout(chk_layout)
+        btn_layout.addLayout(chk_layout, 0)
 
         # 조회 기간 — 프리셋 드롭다운 + 날짜 범위 칸
         period_layout = QtWidgets.QVBoxLayout()
@@ -843,6 +843,13 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.end_date_edit.setDisplayFormat("yyyy.MM.dd")
         self.end_date_edit.setCalendarPopup(True)
         self.end_date_edit.setDate(QtCore.QDate.currentDate())
+
+        # 날짜 칸은 'yyyy.MM.dd' 전체와 달력 아이콘이 항상 보여야 한다.
+        # 위젯이 스스로 계산한 필요 폭을 최소값으로 못 박아, 고배율 화면에서
+        # 글자만 커지고 칸 너비는 그대로라 '2026.08' 처럼 잘리던 문제를 막는다.
+        for _date_edit in (self.start_date_edit, self.end_date_edit):
+            _date_edit.setMinimumWidth(_date_edit.sizeHint().width())
+
         date_range_layout.addWidget(self.start_date_edit)
         date_range_layout.addWidget(QtWidgets.QLabel("~"))
         date_range_layout.addWidget(self.end_date_edit)
@@ -850,7 +857,9 @@ class KidsnoteApp(QtWidgets.QWidget):
 
         self.period_combo.currentIndexChanged.connect(self.on_period_changed)
         self.on_period_changed()  # 초기 상태(전체) 반영
-        btn_layout.addLayout(period_layout)
+        # 체크박스 열은 글자 폭만 차지하게 두어 옆에 빈 공간이 뜨지 않게 하고,
+        # 남는 가로 공간은 날짜 칸이 있는 조회 기간 열이 가져가게 한다.
+        btn_layout.addLayout(period_layout, 1)
 
         # 추억 목록 불러오기 / 작업 중지 버튼 (세로 배치)
         action_btn_layout = QtWidgets.QVBoxLayout()
@@ -878,7 +887,7 @@ class KidsnoteApp(QtWidgets.QWidget):
         """)
         action_btn_layout.addWidget(self.stop_btn)
 
-        btn_layout.addLayout(action_btn_layout)
+        btn_layout.addLayout(action_btn_layout, 0)
 
         right_layout.addLayout(btn_layout)
 
@@ -1136,22 +1145,37 @@ class KidsnoteApp(QtWidgets.QWidget):
             lambda: self.login_btn.click() if self.login_btn.isEnabled() else None
         )
 
-        # --- 옵션 문구 잘림 방지 (고배율 디스플레이 대응) ---
-        # 창 너비는 scale^0.7로 늘어나는데 글자 폭은 scale에 비례해 늘어나므로,
-        # 175~200% 배율에서는 '다운로드 항목 종류' 라디오 문구가 잘렸다.
-        # 창이 고정 크기라 사용자가 늘릴 수도 없으므로, 레이아웃이 실제로 요구하는
-        # 너비를 계산해 부족하면 창을 그만큼 넓힌다 (화면 폭 안에서).
+        self._fit_window_to_contents()
+
+    def _fit_window_to_contents(self):
+        """레이아웃이 실제로 요구하는 너비에 창을 맞춘다.
+
+        창 너비는 scale^0.7로 늘어나는데 글자 폭은 scale에 비례해 커지므로,
+        고배율 화면에서는 옵션 문구나 날짜 칸이 잘렸다. 창이 고정 크기라
+        사용자가 늘릴 수도 없어서, 화면 폭 안에서 필요한 만큼 넓혀 준다.
+        """
         try:
+            fs = getattr(self, '_FS', lambda v: v)
             required = self.sizeHint().width()
             current = self.width()
-            if required > current:
-                screen_w = QtWidgets.QApplication.primaryScreen().availableGeometry().width()
-                new_w = min(required + FS(10), max(current, screen_w - FS(40)))
-                if new_w > current:
-                    self.setFixedSize(new_w, self.height())
-                    write_app_log(f"Window widened for text fit: {current} -> {new_w} (required={required})")
+            if required <= current:
+                return
+            screen = QtWidgets.QApplication.primaryScreen()
+            screen_w = screen.availableGeometry().width() if screen else required
+            new_w = min(required + fs(10), max(current, screen_w - fs(20)))
+            if new_w > current:
+                self.setFixedSize(new_w, self.height())
+                write_app_log(f"Window widened for text fit: {current} -> {new_w} (required={required})")
         except Exception:
-            pass
+            write_app_log("Window fit failed:\n" + traceback.format_exc())
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # init_ui 시점에는 레이아웃이 확정되지 않아 요구폭이 과소 계산된다.
+        # 창이 실제로 표시된 뒤 딱 한 번 더 맞춘다.
+        if not getattr(self, '_fitted_once', False):
+            self._fitted_once = True
+            QtCore.QTimer.singleShot(0, self._fit_window_to_contents)
 
     # --- 로딩 및 잠금 오버레이 제어 ---
     def resizeEvent(self, event):
@@ -1920,6 +1944,11 @@ class KidsnoteApp(QtWidgets.QWidget):
                 self.config.add_section('Prefs')
             self.config.set('Prefs', 'save_dir', self.dir_input.text().strip())
             self.config.set('Prefs', 'period', self.period_combo.currentText())
+            # '직접 지정'으로 고른 날짜 자체도 저장한다. 예전에는 기간 이름만 저장해서,
+            # 다시 켜면 사용자가 고른 날짜가 초기 기본값(최근 1주일)으로 되돌아가
+            # 의도한 기간과 다른 범위로 조회되었다.
+            self.config.set('Prefs', 'start_date', self.start_date_edit.date().toString('yyyy.MM.dd'))
+            self.config.set('Prefs', 'end_date', self.end_date_edit.date().toString('yyyy.MM.dd'))
             self.config.set('Prefs', 'single_folder', str(self.folder_single_radio.isChecked()))
             self.config.set('Prefs', 'overwrite_allow', str(self.overwrite_allow_radio.isChecked()))
             self.config.set('Prefs', 'exclude_video', str(self.chk_exclude_video.isChecked()))
@@ -1945,6 +1974,16 @@ class KidsnoteApp(QtWidgets.QWidget):
             period = self.config.get('Prefs', 'period', fallback='')
             if period and self.period_combo.findText(period) >= 0:
                 self.period_combo.setCurrentText(period)
+
+            # 프리셋은 on_period_changed가 날짜를 다시 계산해 주지만,
+            # '직접 지정'은 사용자가 고른 날짜 자체가 설정이므로 따로 되살려야 한다.
+            if self.period_combo.currentText().startswith('직접'):
+                for _key, _widget in (('start_date', self.start_date_edit), ('end_date', self.end_date_edit)):
+                    _saved = self.config.get('Prefs', _key, fallback='').strip()
+                    if _saved:
+                        _qd = QtCore.QDate.fromString(_saved, 'yyyy.MM.dd')
+                        if _qd.isValid():
+                            _widget.setDate(_qd)
 
             if self.config.getboolean('Prefs', 'single_folder', fallback=False):
                 self.folder_single_radio.setChecked(True)

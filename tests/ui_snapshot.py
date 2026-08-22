@@ -28,7 +28,7 @@ def collect():
     w.show()
     app.processEvents()
 
-    data = {"app_version": ks.APP_VERSION, "window": {"w": w.width(), "h": w.height()}, "widgets": {}, "clipped": []}
+    data = {"app_version": ks.APP_VERSION, "scale_factor": os.environ.get("QT_SCALE_FACTOR", "1"), "window": {"w": w.width(), "h": w.height()}, "widgets": {}, "clipped": []}
 
     named = {
         "status_label": w.status_label, "progress_bar": w.progress_bar,
@@ -42,6 +42,8 @@ def collect():
         "overwrite_allow_radio": w.overwrite_allow_radio,
         "overwrite_skip_radio": w.overwrite_skip_radio,
         "period_combo": w.period_combo, "child_combo": w.child_combo,
+        "start_date_edit": w.start_date_edit, "end_date_edit": w.end_date_edit,
+        "chk_report": w.chk_report, "chk_album": w.chk_album,
         "table": w.table, "dir_input": w.dir_input,
     }
     for name, obj in named.items():

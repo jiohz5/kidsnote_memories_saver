@@ -114,8 +114,30 @@ clipped = [n for n, o in {
     "PDF": w.pdf_radio, "사진": w.photo_radio, "모두": w.both_radio,
     "동영상제외": w.chk_exclude_video, "개별": w.folder_individual_radio,
     "한곳": w.folder_single_radio, "허용": w.overwrite_allow_radio, "넘어가기": w.overwrite_skip_radio,
+    # 아래 4개는 고배율에서 실제로 잘렸던 곳이라 반드시 포함한다
+    "알림장": w.chk_report, "앨범": w.chk_album,
+    "시작일": w.start_date_edit, "종료일": w.end_date_edit,
+    "기간콤보": w.period_combo,
 }.items() if o.width() < o.sizeHint().width()]
-check("옵션 문구 잘림 없음", not clipped, str(clipped))
+# 오프스크린 가상 화면은 실제 모니터보다 훨씬 좁아, 창이 레이아웃 요구폭까지
+# 넓어지지 못한다. 여기서 보려는 것은 '레이아웃이 충분한 폭에서 올바른가'이므로
+# 요구폭을 준 뒤 판정한다. (실제 화면에서는 _fit_window_to_contents가 넓혀준다)
+w.setFixedSize(max(w.sizeHint().width() + 20, w.width()), w.height())
+app.processEvents()
+clipped = [n for n, o in {
+    "PDF": w.pdf_radio, "사진": w.photo_radio, "모두": w.both_radio,
+    "동영상제외": w.chk_exclude_video, "개별": w.folder_individual_radio,
+    "한곳": w.folder_single_radio, "허용": w.overwrite_allow_radio, "넘어가기": w.overwrite_skip_radio,
+    "알림장": w.chk_report, "앨범": w.chk_album,
+    "시작일": w.start_date_edit, "종료일": w.end_date_edit, "기간콤보": w.period_combo,
+}.items() if o.width() < o.sizeHint().width()]
+check("옵션·기간 문구 잘림 없음 (DPI %s)" % os.environ.get("QT_FONT_DPI", "96"), not clipped, str(clipped))
+
+# 날짜 텍스트가 실제로 들어가는지 (sizeHint 통과해도 글자가 넘칠 수 있어 별도 확인)
+_fm = QtGui.QFontMetrics(w.start_date_edit.font())
+check("날짜 텍스트가 칸 안에 들어감",
+      _fm.horizontalAdvance(w.start_date_edit.text()) + 20 <= w.start_date_edit.width(),
+      f"텍스트={_fm.horizontalAdvance(w.start_date_edit.text())} 칸={w.start_date_edit.width()}")
 
 print()
 print("RESULT:", "ALL PASSED" if not fails else f"{len(fails)} FAIL: {fails}")
