@@ -182,6 +182,13 @@ def _detect_kidsnote_app_error(driver):
 #   (1) 여기 한 곳에만 적어두고 (고칠 때 이 블록만 수정)
 #   (2) 클래스로 못 찾으면 _find_post_cards()의 구조 기반 탐색이 대신 찾도록
 # 이중으로 대비합니다.
+# 각 목록의 고유 주소. 메뉴 클릭이 실패했을 때 여기로 직접 이동해 진입하고,
+# 클릭 후 엉뚱한 목록으로 갔는지 확인하는 기준으로도 쓴다.
+SECTION_URLS = {
+    "알림장": "https://www.kidsnote.com/service/report",
+    "앨범": "https://www.kidsnote.com/service/album",
+}
+
 POST_CARD_CLASSES = ("exa4ze60", "css-220836")      # 목록의 게시물 카드
 CARD_DATE_XPATH = ".//div[contains(@class, 'exa4ze65')]/div"   # 카드 안 날짜
 CARD_DATE_CLASS = "css-15xrcbi"                      # 날짜 폴백
@@ -1167,11 +1174,30 @@ def navigate_to_memory_view(driver, item_type_label, log_func, target_child=None
             if target_btn:
                 driver.execute_script("arguments[0].click();", target_btn)
             else:
-                log_func(f"{item_type_label} 전체보기 버튼을 찾지 못했습니다.")
-                return False
+                # 버튼이 안 보인다고 바로 포기하지 않는다. 해당 목록은 고유 주소가 있으므로
+                # 주소로 직접 이동해서라도 진입한다. (앨범 진입이 종종 실패하던 원인)
+                log_func(f"{item_type_label} 전체보기 버튼이 보이지 않아 주소로 직접 이동합니다.")
+                driver.get(SECTION_URLS[item_type_label])
         except Exception as e:
-            log_func(f"전체보기 버튼 클릭 실패: {e}")
-            return False
+            log_func(f"전체보기 버튼 클릭 실패: {e} → 주소로 직접 이동합니다.")
+            try:
+                driver.get(SECTION_URLS[item_type_label])
+            except Exception:
+                return False
+
+        # 엉뚱한 목록으로 갔는지 확인한다.
+        # 앨범인데 '전체보기' 버튼이 하나뿐이면 알림장 버튼을 누르게 되어,
+        # 알림장 글이 앨범으로 수집되는 조용한 오염이 생길 수 있다.
+        try:
+            expected = SECTION_URLS[item_type_label]
+            marker = expected.rsplit("/", 1)[-1]          # 'report' 또는 'album'
+            WebDriverWait(driver, 5).until(lambda d: marker in (d.current_url or ""))
+        except Exception:
+            log_func(f"{item_type_label} 화면이 아닌 곳으로 이동한 것 같아 주소로 다시 진입합니다. (현재: {driver.current_url})")
+            try:
+                driver.get(SECTION_URLS[item_type_label])
+            except Exception:
+                return False
 
         # 목록 항목 대기 (에러 화면이 뜨면 타임아웃을 기다리지 않고 즉시 빠져나옴)
         time.sleep(0.3)  # 아래 대기가 게시물 감지 즉시 통과하므로 고정 안정화는 최소화
