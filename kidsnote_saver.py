@@ -790,6 +790,12 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.child_combo.addItem("1단계를 진행하세요")
         self.child_combo.setEnabled(False)
         self.child_combo.setMinimumHeight(FS(36))
+        # 아이 항목은 '최유찬 21.3.15. (5년 4개월)' 처럼 길다. 좁으면 뒤가 잘리므로
+        # 대표 문구가 들어갈 만큼 최소 폭을 확보하고, 항목이 더 길면 그에 맞춰 늘어나게 한다.
+        self.child_combo.setSizeAdjustPolicy(QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.child_combo.setMinimumWidth(
+            QtGui.QFontMetrics(self.child_combo.font()).horizontalAdvance("최유찬 21.3.15. (5년 4개월)") + FS(52)
+        )
         self.child_combo.setStyleSheet(f"font-weight: bold; font-size: {FS(13)}px; color: #2D3748; background-color: #F7FAFC; border: {S(2)}px solid #E2E8F0; border-radius: {S(5)}px;")
         self.child_combo.currentIndexChanged.connect(self.on_child_combo_changed)
         left_layout.addWidget(self.child_combo)
@@ -850,13 +856,25 @@ class KidsnoteApp(QtWidgets.QWidget):
         for _date_edit in (self.start_date_edit, self.end_date_edit):
             _date_edit.setMinimumWidth(_date_edit.sizeHint().width())
 
+        # '~' 는 구분 기호일 뿐이라 글자 폭만 차지하게 고정한다.
+        # (늘어나게 두면 창이 넓어질 때 가운데가 쓸데없이 벌어진다)
+        tilde_label = QtWidgets.QLabel("~")
+        tilde_label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed,
+                                  QtWidgets.QSizePolicy.Policy.Preferred)
+        tilde_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+
         date_range_layout.addWidget(self.start_date_edit)
-        date_range_layout.addWidget(QtWidgets.QLabel("~"))
+        date_range_layout.addWidget(tilde_label)
         date_range_layout.addWidget(self.end_date_edit)
+        # 남는 폭은 날짜 칸을 늘리지 말고 오른쪽 빈 공간으로 흘려보낸다
+        date_range_layout.addStretch(1)
         period_layout.addLayout(date_range_layout)
 
         self.period_combo.currentIndexChanged.connect(self.on_period_changed)
-        self.on_period_changed()  # 초기 상태(전체) 반영
+        # 달력에서 날짜를 직접 고르면 기간 선택이 '직접 지정'으로 바뀌게 한다
+        self.start_date_edit.dateChanged.connect(self._on_date_edited)
+        self.end_date_edit.dateChanged.connect(self._on_date_edited)
+        self.on_period_changed()  # 초기 상태 반영
         # 체크박스 열은 글자 폭만 차지하게 두어 옆에 빈 공간이 뜨지 않게 하고,
         # 남는 가로 공간은 날짜 칸이 있는 조회 기간 열이 가져가게 한다.
         btn_layout.addLayout(period_layout, 1)
@@ -2054,11 +2072,9 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.chk_report.setEnabled(enabled)
         self.chk_album.setEnabled(enabled)
         self.period_combo.setEnabled(enabled)
-        if enabled:
-            self.on_period_changed()  # '직접 지정' 모드였다면 날짜칸 활성 상태를 복원
-        else:
-            self.start_date_edit.setEnabled(False)
-            self.end_date_edit.setEnabled(False)
+        # 날짜칸은 평소에는 항상 고를 수 있고, 작업 중에만 잠근다.
+        self.start_date_edit.setEnabled(enabled)
+        self.end_date_edit.setEnabled(enabled)
         self.child_combo.setEnabled(enabled and bool(getattr(self, 'children_data', None)))
 
     # 프리셋 텍스트 → 오늘로부터의 일수 (전체/직접 지정은 별도 처리)
@@ -2067,22 +2083,41 @@ class KidsnoteApp(QtWidgets.QWidget):
     )
 
     def on_period_changed(self):
-        """조회 기간 콤보 변경 시 날짜칸을 자동 반영. '직접 지정'만 날짜칸 활성화."""
+        """조회 기간 콤보를 바꾸면 날짜칸에 해당 기간을 채워 넣는다.
+
+        날짜칸 자체는 항상 만질 수 있다. 프리셋은 '빠른 입력'일 뿐이고,
+        사용자가 달력에서 날짜를 직접 고르면 _on_date_edited가 콤보를
+        '직접 지정'으로 바꿔 준다.
+        """
         text = self.period_combo.currentText()
-        manual = text.startswith("직접")
-        self.start_date_edit.setEnabled(manual)
-        self.end_date_edit.setEnabled(manual)
-        if manual:
-            return
+        if text.startswith("직접"):
+            return  # 사용자가 고른 날짜를 덮어쓰지 않는다
+
         today = QtCore.QDate.currentDate()
-        self.end_date_edit.setDate(today)
-        if text.startswith("전체"):
-            self.start_date_edit.setDate(QtCore.QDate(2000, 1, 1))
-            return
-        for keyword, preset_days in self._PERIOD_PRESET_DAYS:
-            if keyword in text:
-                self.start_date_edit.setDate(today.addDays(-preset_days))
+        self._applying_preset = True   # 아래 setDate가 '직접 지정'으로 튀지 않게 표시
+        try:
+            self.end_date_edit.setDate(today)
+            if text.startswith("전체"):
+                self.start_date_edit.setDate(QtCore.QDate(2000, 1, 1))
                 return
+            for keyword, preset_days in self._PERIOD_PRESET_DAYS:
+                if keyword in text:
+                    self.start_date_edit.setDate(today.addDays(-preset_days))
+                    return
+        finally:
+            self._applying_preset = False
+
+    def _on_date_edited(self):
+        """사용자가 날짜를 직접 고치면 기간 선택을 '직접 지정'으로 전환한다."""
+        if getattr(self, '_applying_preset', False):
+            return  # 프리셋 적용 때문에 바뀐 것이므로 무시
+        if self.period_combo.currentText().startswith("직접"):
+            return
+        idx = self.period_combo.findText("직접 지정")
+        if idx >= 0:
+            self.period_combo.blockSignals(True)   # on_period_changed가 날짜를 되돌리지 않게
+            self.period_combo.setCurrentIndex(idx)
+            self.period_combo.blockSignals(False)
 
     def _period_desc(self):
         """결과 안내 메시지에 쓸 조회 기간 설명 문자열."""

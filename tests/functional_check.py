@@ -33,9 +33,22 @@ app.processEvents()
 today = QtCore.QDate.currentDate()
 w.period_combo.setCurrentText("최근 1주일")
 check("기간 프리셋: 시작일 = 오늘-7", w.start_date_edit.date() == today.addDays(-7))
-check("기간 프리셋: 날짜칸 비활성", not w.start_date_edit.isEnabled())
+check("기간 프리셋에서도 날짜칸은 선택 가능", w.start_date_edit.isEnabled())
 w.period_combo.setCurrentText("직접 지정")
 check("직접 지정: 날짜칸 활성", w.start_date_edit.isEnabled())
+
+# 달력에서 날짜를 직접 고르면 기간이 '직접 지정'으로 전환되고 그 날짜가 유지되어야 한다
+w.period_combo.setCurrentText("최근 1주일")
+app.processEvents()
+w.start_date_edit.setDate(QtCore.QDate(2025, 5, 5))
+app.processEvents()
+check("날짜 직접 선택 시 '직접 지정'으로 전환", w.period_combo.currentText().startswith("직접"),
+      w.period_combo.currentText())
+check("직접 고른 날짜가 유지됨", w.start_date_edit.date() == QtCore.QDate(2025, 5, 5),
+      w.start_date_edit.date().toString("yyyy.MM.dd"))
+w.period_combo.setCurrentText("최근 1개월")
+app.processEvents()
+check("프리셋 재선택 시 다시 계산됨", w.start_date_edit.date() == today.addDays(-30))
 w.period_combo.setCurrentText("전체")
 check("전체: _period_desc", w._period_desc() == "전체", w._period_desc())
 
