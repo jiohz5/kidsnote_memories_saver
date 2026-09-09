@@ -13,6 +13,7 @@ from selenium.webdriver.chrome.service import Service
 import kidsnote_engine as manager
 import kidsnote_paths as paths
 import edge_driver
+import kidsnote_settings
 
 APP_VERSION = "1.08"
 UPDATE_CHECK_REPO = "jiohz5/kidsnote_memories_saver"
@@ -584,37 +585,114 @@ class KidsnoteApp(QtWidgets.QWidget):
                 return os.path.join(sys._MEIPASS, 'kidsnote_icon.ico')
             return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'kidsnote_icon.ico')
 
-        app_icon = QtGui.QIcon(get_icon_path())
-        self.setWindowIcon(app_icon)
+        # 창과 트레이가 같은 아이콘을 쓰므로 인스턴스에 들고 있는다
+        self._app_icon = QtGui.QIcon(get_icon_path())
+        self.setWindowIcon(self._app_icon)
 
         # --- 레이아웃 설정 (메인 스크롤바를 없애기 위해 QScrollArea 제거하고 창 자체에 고정) ---
         main_layout = QtWidgets.QVBoxLayout(self)
         main_layout.setSpacing(FS(10))
 
-        # Config setup for Local ID/PW save
-        import configparser, base64
-        self.config = configparser.ConfigParser()
-        self.config_path = os.path.join(os.path.expanduser("~"), "Kidsnote_Config.ini")
-        # 설정 파일이 깨져 있어도(BOM 포함/다른 인코딩/손상) 프로그램이 못 뜨는 일은 없어야 한다.
-        # configparser.read()는 기본 로케일 인코딩으로 열기 때문에 BOM 하나만 있어도 예외로 죽는다.
-        for _enc in ("utf-8-sig", "utf-8", None):
-            try:
-                self.config.read(self.config_path, encoding=_enc)
-                break
-            except UnicodeDecodeError:
-                continue
-            except Exception:
-                write_app_log("Config read failed; starting with defaults:\n" + traceback.format_exc())
-                self.config = configparser.ConfigParser()
-                break
-        
-        saved_id = self.config.get('Login', 'id', fallback='')
-        saved_pw_stored = self.config.get('Login', 'pw', fallback='')
-        saved_remember = self.config.getboolean('Login', 'remember', fallback=False)
-        # DPAPI 암호화 저장값(신규)과 base64 저장값(구버전) 모두 지원
-        saved_pw = manager.unprotect_secret(saved_pw_stored)
+        # 아이디/비밀번호와 다운로드 옵션을 담아 두는 설정 파일
+        self.settings = kidsnote_settings.Settings(log=write_app_log)
 
-        # Login Info Group
+        self._build_login_group(main_layout, S, FS)
+
+        self._build_status_area(main_layout, S, FS)
+        self._build_collect_group(main_layout, S, FS)
+
+        # Table View Group
+        self._build_table_group(main_layout, S, FS)
+
+        # Download Options Layout
+        self._build_options_group(main_layout, S, FS)
+
+        # Download Button + Pause Button
+        download_row = QtWidgets.QHBoxLayout()
+        self.download_btn = QtWidgets.QPushButton('3. 선택한 항목 다운로드 시작')
+        self.download_btn.clicked.connect(self.start_download)
+        self.download_btn.setEnabled(False)
+        self.download_btn.setFixedHeight(FS(40))
+        self.download_btn.setStyleSheet(f"""
+            QPushButton {{ background-color: #FFC300; color: #2D3748; font-weight: bold; border-radius: {S(6)}px; }}
+            QPushButton:hover {{ background-color: #E6B000; }}
+            QPushButton:disabled {{ background-color: #FFDE59; color: #8A94A6; }}
+        """)
+        download_row.addWidget(self.download_btn, stretch=4)
+
+        self.pause_btn = QtWidgets.QPushButton('일시정지')
+        self.pause_btn.clicked.connect(self.toggle_pause)
+        self.pause_btn.setEnabled(False)
+        self.pause_btn.setFixedHeight(FS(40))
+        self.pause_btn.setToolTip("현재 항목까지 마친 뒤 잠시 멈춥니다. 다시 누르면 이어서 진행합니다.")
+        download_row.addWidget(self.pause_btn, stretch=1)
+        main_layout.addLayout(download_row)
+
+        # (QScrollArea 제거됨: 레이아웃이 self에 직접 연결되었으므로 추가 설정 불필요)
+
+        # --- 로딩 오버레이 ---
+        self._overlay = QtWidgets.QWidget(self)
+        self._overlay.setStyleSheet("background-color: rgba(0, 0, 0, 160);")
+        self._overlay_label = QtWidgets.QLabel("잠시만 기다려 주세요...", self._overlay)
+        self._overlay_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self._overlay_label.setStyleSheet(f"""
+            color: white;
+            font-size: {FS(18)}px;
+            font-weight: bold;
+            background: transparent;
+            padding: {FS(20)}px;
+        """)
+        self._overlay_label.setWordWrap(True)
+        overlay_layout = QtWidgets.QVBoxLayout(self._overlay)
+        overlay_layout.addStretch()
+        overlay_layout.addWidget(self._overlay_label)
+        overlay_layout.addStretch()
+        self._overlay.hide()
+
+        # --- 1단계 잠금 오버레이 (로그인 전 메뉴 접근 방지) ---
+        self.lock_overlay = QtWidgets.QWidget(self)
+        self.lock_overlay.setStyleSheet("background-color: rgba(240, 240, 240, 200);")
+        lock_label = QtWidgets.QLabel("위에서 '키즈노트 로그인 열기'를 먼저 완료해 주세요", self.lock_overlay)
+        lock_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        lock_label.setStyleSheet(f"color: #2D3748; font-size: {FS(18)}px; font-weight: bold; background: transparent;")
+        lock_layout = QtWidgets.QVBoxLayout(self.lock_overlay)
+        lock_layout.addWidget(lock_label)
+        self.lock_overlay.show()
+        self.lock_overlay.raise_()
+
+        # --- 2/3단계 잠금 오버레이 (추억 목록 불러오기 전 접근 방지) ---
+        self.stage2_lock_overlay = QtWidgets.QWidget(self)
+        self.stage2_lock_overlay.setStyleSheet("background-color: rgba(240, 240, 240, 210);")
+        stage2_lock_label = QtWidgets.QLabel("먼저 1단계에서 [추억 목록 불러오기]를 진행해 주세요", self.stage2_lock_overlay)
+        stage2_lock_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        stage2_lock_label.setStyleSheet(f"color: #2D3748; font-size: {FS(18)}px; font-weight: bold; background: transparent;")
+        stage2_lock_layout = QtWidgets.QVBoxLayout(self.stage2_lock_overlay)
+        stage2_lock_layout.addWidget(stage2_lock_label)
+        self.stage2_lock_overlay.hide()  # 초기에는 1단계 오버레이가 가리고 있으므로 숨김 (1단계 열릴 때 같이 켬)
+
+        # 이전 실행에서 쓰던 저장 경로·옵션 복원 (매번 다시 고르지 않도록)
+        self._restore_prefs()
+
+        # 아이디/비밀번호 입력 후 Enter로 바로 로그인 (마우스로 버튼을 찾지 않아도 되게)
+        self.id_input.returnPressed.connect(lambda: self.pw_input.setFocus())
+        self.pw_input.returnPressed.connect(
+            lambda: self.login_btn.click() if self.login_btn.isEnabled() else None
+        )
+
+        self._fit_window_to_contents()
+
+    def _build_login_group(self, main_layout, S, FS):
+        """로그인 정보 칸를 만들어 창에 붙인다.
+
+        S와 FS는 화면 해상도에 맞춘 크기·글꼴 스케일 함수다.
+        init_ui가 화면 크기를 보고 만들어 넘겨준다.
+        """
+        # 지난번에 저장해 둔 로그인 정보를 미리 채워 둔다.
+        # 비밀번호는 DPAPI 암호화 저장값(신규)과 base64 저장값(구버전)을 모두 받아들인다.
+        saved_id = self.settings.get('Login', 'id')
+        saved_pw = manager.unprotect_secret(self.settings.get('Login', 'pw'))
+        saved_remember = self.settings.get_bool('Login', 'remember')
+
         login_group = QtWidgets.QGroupBox("로그인 정보")
         login_layout = QtWidgets.QHBoxLayout()
         login_layout.setSpacing(FS(15))
@@ -673,9 +751,15 @@ class KidsnoteApp(QtWidgets.QWidget):
         login_group.setLayout(login_layout)
         main_layout.addWidget(login_group)
 
+    def _build_status_area(self, main_layout, S, FS):
+        """상태 문구와 진행률, 보조 버튼들를 만들어 창에 붙인다.
+
+        S와 FS는 화면 해상도에 맞춘 크기·글꼴 스케일 함수다.
+        init_ui가 화면 크기를 보고 만들어 넘겨준다.
+        """
         # Tray Icon for notifications
         self.tray_icon = QtWidgets.QSystemTrayIcon(self)
-        self.tray_icon.setIcon(app_icon)
+        self.tray_icon.setIcon(self._app_icon)
         self.tray_icon.show()
 
         # Status Label and Progress Bar
@@ -741,6 +825,13 @@ class KidsnoteApp(QtWidgets.QWidget):
         main_layout.addLayout(status_area_layout)
 
         # Collect Options Group (1단계: 아이 현황 및 수집 범위)
+
+    def _build_collect_group(self, main_layout, S, FS):
+        """1단계: 아이 현황과 수집 범위를 만들어 창에 붙인다.
+
+        S와 FS는 화면 해상도에 맞춘 크기·글꼴 스케일 함수다.
+        init_ui가 화면 크기를 보고 만들어 넘겨준다.
+        """
         collect_group = QtWidgets.QGroupBox("1단계: 아이 현황 및 수집 범위")
         collect_main_layout = QtWidgets.QHBoxLayout()
 
@@ -898,7 +989,12 @@ class KidsnoteApp(QtWidgets.QWidget):
         collect_group.setLayout(collect_main_layout)
         main_layout.addWidget(collect_group)
 
-        # Table View Group
+    def _build_table_group(self, main_layout, S, FS):
+        """2단계: 수집된 목록 표를 만들어 창에 붙인다.
+
+        S와 FS는 화면 해상도에 맞춘 크기·글꼴 스케일 함수다.
+        init_ui가 화면 크기를 보고 만들어 넘겨준다.
+        """
         table_group = QtWidgets.QGroupBox("2단계: 수집된 추억 목록 확인 및 선택")
         table_layout = QtWidgets.QVBoxLayout()
 
@@ -955,8 +1051,15 @@ class KidsnoteApp(QtWidgets.QWidget):
         
         table_group.setLayout(table_layout)
         main_layout.addWidget(table_group)
+        # 2단계 잠금 오버레이의 위치를 잡을 때 이 그룹의 좌표가 필요하다
+        self.table_group = table_group
 
-        # Download Options Layout
+    def _build_options_group(self, main_layout, S, FS):
+        """3단계: 저장 옵션를 만들어 창에 붙인다.
+
+        S와 FS는 화면 해상도에 맞춘 크기·글꼴 스케일 함수다.
+        init_ui가 화면 크기를 보고 만들어 넘겨준다.
+        """
         options_group = QtWidgets.QGroupBox("3단계: 최종 다운로드 설정")
         options_layout = QtWidgets.QVBoxLayout()
 
@@ -1063,83 +1166,6 @@ class KidsnoteApp(QtWidgets.QWidget):
         options_group.setLayout(options_layout)
         main_layout.addWidget(options_group)
 
-        # Download Button + Pause Button
-        download_row = QtWidgets.QHBoxLayout()
-        self.download_btn = QtWidgets.QPushButton('3. 선택한 항목 다운로드 시작')
-        self.download_btn.clicked.connect(self.start_download)
-        self.download_btn.setEnabled(False)
-        self.download_btn.setFixedHeight(FS(40))
-        self.download_btn.setStyleSheet(f"""
-            QPushButton {{ background-color: #FFC300; color: #2D3748; font-weight: bold; border-radius: {S(6)}px; }}
-            QPushButton:hover {{ background-color: #E6B000; }}
-            QPushButton:disabled {{ background-color: #FFDE59; color: #8A94A6; }}
-        """)
-        download_row.addWidget(self.download_btn, stretch=4)
-
-        self.pause_btn = QtWidgets.QPushButton('일시정지')
-        self.pause_btn.clicked.connect(self.toggle_pause)
-        self.pause_btn.setEnabled(False)
-        self.pause_btn.setFixedHeight(FS(40))
-        self.pause_btn.setToolTip("현재 항목까지 마친 뒤 잠시 멈춥니다. 다시 누르면 이어서 진행합니다.")
-        download_row.addWidget(self.pause_btn, stretch=1)
-        main_layout.addLayout(download_row)
-
-        # (QScrollArea 제거됨: 레이아웃이 self에 직접 연결되었으므로 추가 설정 불필요)
-
-        # --- 로딩 오버레이 ---
-        self._overlay = QtWidgets.QWidget(self)
-        self._overlay.setStyleSheet("background-color: rgba(0, 0, 0, 160);")
-        self._overlay_label = QtWidgets.QLabel("잠시만 기다려 주세요...", self._overlay)
-        self._overlay_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self._overlay_label.setStyleSheet(f"""
-            color: white;
-            font-size: {FS(18)}px;
-            font-weight: bold;
-            background: transparent;
-            padding: {FS(20)}px;
-        """)
-        self._overlay_label.setWordWrap(True)
-        overlay_layout = QtWidgets.QVBoxLayout(self._overlay)
-        overlay_layout.addStretch()
-        overlay_layout.addWidget(self._overlay_label)
-        overlay_layout.addStretch()
-        self._overlay.hide()
-
-        # --- 1단계 잠금 오버레이 (로그인 전 메뉴 접근 방지) ---
-        self.lock_overlay = QtWidgets.QWidget(self)
-        self.lock_overlay.setStyleSheet("background-color: rgba(240, 240, 240, 200);")
-        lock_label = QtWidgets.QLabel("위에서 '키즈노트 로그인 열기'를 먼저 완료해 주세요", self.lock_overlay)
-        lock_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        lock_label.setStyleSheet(f"color: #2D3748; font-size: {FS(18)}px; font-weight: bold; background: transparent;")
-        lock_layout = QtWidgets.QVBoxLayout(self.lock_overlay)
-        lock_layout.addWidget(lock_label)
-        self.lock_overlay.show()
-        self.lock_overlay.raise_()
-
-        # --- 2/3단계 잠금 오버레이 (추억 목록 불러오기 전 접근 방지) ---
-        self.stage2_lock_overlay = QtWidgets.QWidget(self)
-        self.stage2_lock_overlay.setStyleSheet("background-color: rgba(240, 240, 240, 210);")
-        stage2_lock_label = QtWidgets.QLabel("먼저 1단계에서 [추억 목록 불러오기]를 진행해 주세요", self.stage2_lock_overlay)
-        stage2_lock_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        stage2_lock_label.setStyleSheet(f"color: #2D3748; font-size: {FS(18)}px; font-weight: bold; background: transparent;")
-        stage2_lock_layout = QtWidgets.QVBoxLayout(self.stage2_lock_overlay)
-        stage2_lock_layout.addWidget(stage2_lock_label)
-        self.stage2_lock_overlay.hide()  # 초기에는 1단계 오버레이가 가리고 있으므로 숨김 (1단계 열릴 때 같이 켬)
-
-        # 위치 계산에 필요한 핵심 위젯 참조 저장
-        self.table_group = table_group
-
-        # 이전 실행에서 쓰던 저장 경로·옵션 복원 (매번 다시 고르지 않도록)
-        self._restore_prefs()
-
-        # 아이디/비밀번호 입력 후 Enter로 바로 로그인 (마우스로 버튼을 찾지 않아도 되게)
-        self.id_input.returnPressed.connect(lambda: self.pw_input.setFocus())
-        self.pw_input.returnPressed.connect(
-            lambda: self.login_btn.click() if self.login_btn.isEnabled() else None
-        )
-
-        self._fit_window_to_contents()
-
     def _fit_window_to_contents(self):
         """레이아웃이 실제로 요구하는 너비에 창을 맞춘다.
 
@@ -1243,21 +1269,17 @@ class KidsnoteApp(QtWidgets.QWidget):
         username = self.id_input.text().strip()
         password = self.pw_input.text().strip()
         
-        # Save credentials locally if checked
-        if not self.config.has_section('Login'):
-            self.config.add_section('Login')
+        # 체크한 경우에만 아이디/비밀번호를 남긴다.
+        # 비밀번호는 Windows DPAPI(사용자 계정 단위 암호화)로 저장 — base64 평문 저장 금지
         if self.chk_remember.isChecked():
-            # 비밀번호는 Windows DPAPI(사용자 계정 단위 암호화)로 저장 — base64 평문 저장 금지
-            self.config.set('Login', 'id', username)
-            self.config.set('Login', 'pw', manager.protect_secret(password))
-            self.config.set('Login', 'remember', 'True')
+            self.settings.set_many('Login', {
+                'id': username,
+                'pw': manager.protect_secret(password),
+                'remember': True,
+            })
         else:
-            self.config.set('Login', 'id', '')
-            self.config.set('Login', 'pw', '')
-            self.config.set('Login', 'remember', 'False')
-            
-        with open(self.config_path, 'w', encoding='utf-8') as f:
-            self.config.write(f)
+            self.settings.set_many('Login', {'id': '', 'pw': '', 'remember': False})
+        self.settings.save()
 
         self.status_label.setText('브라우저 여는 중 및 로그인 입력 중...')
         self.login_btn.setEnabled(False)
@@ -1537,38 +1559,38 @@ class KidsnoteApp(QtWidgets.QWidget):
     # 매번 같은 설정을 다시 고르게 하지 않기 위해 Kidsnote_Config.ini의 [Prefs]에 보관한다.
     def _save_prefs(self):
         try:
-            if not self.config.has_section('Prefs'):
-                self.config.add_section('Prefs')
-            self.config.set('Prefs', 'save_dir', self.dir_input.text().strip())
-            self.config.set('Prefs', 'period', self.period_combo.currentText())
-            # '직접 지정'으로 고른 날짜 자체도 저장한다. 예전에는 기간 이름만 저장해서,
-            # 다시 켜면 사용자가 고른 날짜가 초기 기본값(최근 1주일)으로 되돌아가
-            # 의도한 기간과 다른 범위로 조회되었다.
-            self.config.set('Prefs', 'start_date', self.start_date_edit.date().toString('yyyy.MM.dd'))
-            self.config.set('Prefs', 'end_date', self.end_date_edit.date().toString('yyyy.MM.dd'))
-            self.config.set('Prefs', 'single_folder', str(self.folder_single_radio.isChecked()))
-            self.config.set('Prefs', 'overwrite_allow', str(self.overwrite_allow_radio.isChecked()))
-            self.config.set('Prefs', 'exclude_video', str(self.chk_exclude_video.isChecked()))
             if self.both_radio.isChecked():
                 filetype = 'both'
             elif self.photo_radio.isChecked():
                 filetype = 'photo'
             else:
                 filetype = 'pdf'
-            self.config.set('Prefs', 'filetype', filetype)
-            with open(self.config_path, 'w', encoding='utf-8') as f:
-                self.config.write(f)
+
+            self.settings.set_many('Prefs', {
+                'save_dir': self.dir_input.text().strip(),
+                'period': self.period_combo.currentText(),
+                # '직접 지정'으로 고른 날짜 자체도 저장한다. 예전에는 기간 이름만 저장해서,
+                # 다시 켜면 사용자가 고른 날짜가 기본값으로 되돌아가
+                # 의도한 기간과 다른 범위로 조회되었다.
+                'start_date': self.start_date_edit.date().toString('yyyy.MM.dd'),
+                'end_date': self.end_date_edit.date().toString('yyyy.MM.dd'),
+                'single_folder': self.folder_single_radio.isChecked(),
+                'overwrite_allow': self.overwrite_allow_radio.isChecked(),
+                'exclude_video': self.chk_exclude_video.isChecked(),
+                'filetype': filetype,
+            })
+            self.settings.save()
         except Exception:
             write_app_log("Prefs save failed:\n" + traceback.format_exc())
 
     def _restore_prefs(self):
         """이전 실행에서 쓰던 저장 경로·옵션을 복원 (없으면 기본값 유지)."""
         try:
-            saved_dir = self.config.get('Prefs', 'save_dir', fallback='').strip()
+            saved_dir = self.settings.get('Prefs', 'save_dir').strip()
             if saved_dir:
                 self.dir_input.setText(saved_dir)
 
-            period = self.config.get('Prefs', 'period', fallback='')
+            period = self.settings.get('Prefs', 'period')
             if period and self.period_combo.findText(period) >= 0:
                 self.period_combo.setCurrentText(period)
 
@@ -1576,20 +1598,20 @@ class KidsnoteApp(QtWidgets.QWidget):
             # '직접 지정'은 사용자가 고른 날짜 자체가 설정이므로 따로 되살려야 한다.
             if self.period_combo.currentText().startswith('직접'):
                 for _key, _widget in (('start_date', self.start_date_edit), ('end_date', self.end_date_edit)):
-                    _saved = self.config.get('Prefs', _key, fallback='').strip()
+                    _saved = self.settings.get('Prefs', _key).strip()
                     if _saved:
                         _qd = QtCore.QDate.fromString(_saved, 'yyyy.MM.dd')
                         if _qd.isValid():
                             _widget.setDate(_qd)
 
-            if self.config.getboolean('Prefs', 'single_folder', fallback=False):
+            if self.settings.get_bool('Prefs', 'single_folder', False):
                 self.folder_single_radio.setChecked(True)
-            if not self.config.getboolean('Prefs', 'overwrite_allow', fallback=True):
+            if not self.settings.get_bool('Prefs', 'overwrite_allow', True):
                 self.overwrite_skip_radio.setChecked(True)
-            if self.config.getboolean('Prefs', 'exclude_video', fallback=False):
+            if self.settings.get_bool('Prefs', 'exclude_video', False):
                 self.chk_exclude_video.setChecked(True)
 
-            filetype = self.config.get('Prefs', 'filetype', fallback='pdf')
+            filetype = self.settings.get('Prefs', 'filetype', 'pdf')
             if filetype == 'both':
                 self.both_radio.setChecked(True)
             elif filetype == 'photo':
