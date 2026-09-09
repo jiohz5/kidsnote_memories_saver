@@ -12,6 +12,7 @@ from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 import kidsnote_engine as manager
 import kidsnote_paths as paths
+import edge_driver
 
 APP_VERSION = "1.08"
 UPDATE_CHECK_REPO = "jiohz5/kidsnote_memories_saver"
@@ -1264,204 +1265,26 @@ class KidsnoteApp(QtWidgets.QWidget):
         self._show_overlay('🔐 키즈노트 브라우저를 여는 중...')
         threading.Thread(target=self._init_driver, args=(username, password), daemon=True).start()
 
-    def _get_installed_edge_version(self):
-        edge_dirs = [
-            r"C:\Program Files (x86)\Microsoft\Edge\Application",
-            r"C:\Program Files\Microsoft\Edge\Application",
-        ]
-        versions = []
-        for edge_dir in edge_dirs:
-            try:
-                for name in os.listdir(edge_dir):
-                    parts = name.split(".")
-                    if len(parts) == 4 and all(part.isdigit() for part in parts):
-                        versions.append(name)
-            except Exception:
-                pass
-        if not versions:
-            return ""
-
-        def version_key(version):
-            return tuple(int(part) for part in version.split("."))
-
-        return sorted(versions, key=version_key)[-1]
-
-    def _get_driver_version(self, driver_path):
-        try:
-            import subprocess
-            result = subprocess.run(
-                [driver_path, "--version"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                creationflags=0x08000000,
-            )
-            import re
-            match = re.search(r"(\d+\.\d+\.\d+\.\d+)", result.stdout or result.stderr or "")
-            return match.group(1) if match else ""
-        except Exception:
-            return ""
-
-    def _is_compatible_edge_driver(self, edge_version, driver_version):
-        if not edge_version or not driver_version:
-            return False
-        return edge_version.split(".")[:3] == driver_version.split(".")[:3]
-
-    def _driver_cache_root(self):
-        return os.path.join(
-            os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
-            "KidsnoteMemoriesSaver",
-            "drivers",
-        )
-
-    def _edge_driver_package_name(self):
-        import platform
-        machine = platform.machine().lower()
-        if "arm64" in machine or "aarch64" in machine:
-            return "edgedriver_arm64.zip"
-        if machine in ("x86", "i386", "i686") or machine.endswith("32"):
-            return "edgedriver_win32.zip"
-        return "edgedriver_win64.zip"
-
-    def _find_cached_edge_driver(self, edge_version):
-        cache_root = self._driver_cache_root()
-        try:
-            for root, dirs, files in os.walk(cache_root):
-                if "msedgedriver.exe" not in files:
-                    continue
-                driver_path = os.path.join(root, "msedgedriver.exe")
-                if self._is_compatible_edge_driver(edge_version, self._get_driver_version(driver_path)):
-                    return driver_path
-        except Exception:
-            pass
-        return ""
-
-    def _edge_driver_download_versions(self, edge_version):
-        versions = [edge_version]
-        build_version = ".".join(edge_version.split(".")[:3])
-        latest_url = f"https://msedgedriver.microsoft.com/LATEST_RELEASE_{build_version}"
-        try:
-            import urllib.request
-            req = urllib.request.Request(latest_url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=8) as response:
-                latest = response.read().decode("utf-8", errors="ignore").strip()
-            if latest and latest not in versions:
-                versions.append(latest)
-        except Exception:
-            pass
-        return versions
-
-    def _cleanup_driver_cache(self, keep_driver_path):
-        cache_root = self._driver_cache_root()
-        try:
-            keep_dir = os.path.dirname(os.path.abspath(keep_driver_path)) if keep_driver_path else ""
-            version_dirs = []
-            for name in os.listdir(cache_root):
-                path = os.path.join(cache_root, name)
-                if os.path.isdir(path) and path != keep_dir:
-                    version_dirs.append((os.path.getmtime(path), path))
-            for _, path in sorted(version_dirs, reverse=True)[5:]:
-                import shutil
-                shutil.rmtree(path, ignore_errors=True)
-        except Exception:
-            pass
-
-    def _cache_driver_copy(self, source_path, cache_name):
-        if not source_path or not os.path.exists(source_path):
-            return ""
-        try:
-            driver_version = self._get_driver_version(source_path) or "unknown"
-            cache_dir = os.path.join(self._driver_cache_root(), cache_name, driver_version)
-            cached_path = os.path.join(cache_dir, "msedgedriver.exe")
-            if not os.path.exists(cached_path):
-                os.makedirs(cache_dir, exist_ok=True)
-                shutil.copy2(source_path, cached_path)
-            return cached_path
-        except Exception:
-            return source_path
-
-    def _download_edge_driver(self, edge_version):
-        if not edge_version:
-            return ""
-
-        cached_driver = self._find_cached_edge_driver(edge_version)
-        if cached_driver:
-            return cached_driver
-
-        package_name = self._edge_driver_package_name()
-        cache_dir = os.path.join(self._driver_cache_root(), edge_version)
-        driver_path = os.path.join(cache_dir, "msedgedriver.exe")
-        if self._is_compatible_edge_driver(edge_version, self._get_driver_version(driver_path)):
-            return driver_path
-
-        for download_version in self._edge_driver_download_versions(edge_version):
-            try:
-                import io
-                import zipfile
-                import urllib.request
-                os.makedirs(cache_dir, exist_ok=True)
-                url = f"https://msedgedriver.microsoft.com/{download_version}/{package_name}"
-                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                self.update_status(f"Edge {edge_version}에 맞는 WebDriver를 자동 다운로드 중...")
-                with urllib.request.urlopen(req, timeout=30) as response:
-                    data = response.read()
-                with zipfile.ZipFile(io.BytesIO(data)) as zf:
-                    exe_names = [name for name in zf.namelist() if os.path.basename(name).lower() == "msedgedriver.exe"]
-                    if not exe_names:
-                        continue
-                    with open(driver_path, "wb") as f:
-                        f.write(zf.read(exe_names[0]))
-                if self._is_compatible_edge_driver(edge_version, self._get_driver_version(driver_path)):
-                    self._cleanup_driver_cache(driver_path)
-                    return driver_path
-            except Exception:
-                continue
-        return ""
-
     def _start_edge_driver(self, options, bundled_driver_path):
+        """Edge를 띄운다. 사용자 PC의 Edge와 맞는 드라이버부터 차례로 시도한다.
+
+        어느 드라이버를 쓸지 고르는 규칙은 edge_driver 모듈에 있다.
+        (빌드 스크립트도 같은 모듈을 쓴다)
+        """
         from selenium.webdriver.edge.service import Service
         from selenium.common.exceptions import SessionNotCreatedException, WebDriverException
 
-        edge_version = self._get_installed_edge_version()
-        candidates = []
-
-        manual_driver_path = os.environ.get("KIDSNOTE_MSEDGEDRIVER", "")
-        if not manual_driver_path:
-            app_dir = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
-            manual_driver_path = os.path.join(app_dir, "msedgedriver.exe")
-
-        if manual_driver_path and os.path.exists(manual_driver_path):
-            if self._is_compatible_edge_driver(edge_version, self._get_driver_version(manual_driver_path)):
-                candidates.append(manual_driver_path)
-
-        bundled_driver_cached = self._cache_driver_copy(bundled_driver_path, "bundled")
-        bundled_version = self._get_driver_version(bundled_driver_cached)
-        if self._is_compatible_edge_driver(edge_version, bundled_version):
-            candidates.append(bundled_driver_cached)
-        else:
-            downloaded_driver = self._download_edge_driver(edge_version)
-            if downloaded_driver:
-                candidates.append(downloaded_driver)
-            if bundled_driver_cached and os.path.exists(bundled_driver_cached):
-                candidates.append(bundled_driver_cached)
-            if manual_driver_path and os.path.exists(manual_driver_path):
-                candidates.append(manual_driver_path)
-
-        tried = set()
         last_error = None
-        for driver_path in candidates:
-            if not driver_path or driver_path in tried:
-                continue
-            tried.add(driver_path)
+        for driver_path in edge_driver.driver_candidates(bundled_driver_path,
+                                                         status_callback=self.update_status):
             try:
-                return webdriver.Edge(service=Service(executable_path=driver_path), options=options)
-            except SessionNotCreatedException as e:
-                last_error = e
-                continue
-            except WebDriverException as e:
+                return webdriver.Edge(service=Service(executable_path=driver_path),
+                                      options=options)
+            except (SessionNotCreatedException, WebDriverException) as e:
                 last_error = e
                 continue
 
+        # 준비해 둔 것이 모두 실패하면 Selenium이 알아서 찾게 맡긴다
         self.update_status("내장 WebDriver로 실행하지 못해 Selenium Manager로 재시도합니다...")
         try:
             return webdriver.Edge(options=options)
