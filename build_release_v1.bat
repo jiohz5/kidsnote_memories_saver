@@ -34,9 +34,9 @@ if not exist "%DRIVER_PATH%" (
 )
 
 REM ---- DLL search path -------------------------------------------------------
-REM anaconda 기반 파이썬은 _ssl / _lzma / _ctypes 가 Libraryin 의 DLL에 의존한다.
-REM 그 경로가 PATH에 없으면 PyInstaller가 DLL을 못 찾아, 빌드는 성공해도 실행 시
-REM "DLL load failed while importing _ssl" 로 죽는다. 빌드 파이썬 기준으로 직접 잡아준다.
+REM Anaconda-based Python resolves _ssl / _lzma / _ctypes through DLLs in
+REM Library\bin. Without that folder on PATH, PyInstaller cannot find them:
+REM the build succeeds but the exe dies at startup on a DLL load failure.
 "%BUILD_PY%" "%SCRIPT_DIR%check_driver.py" --print-dll-dir > "%TEMP%\_kn_dlldir.txt" 2>nul
 set "PY_DLL_DIR="
 if exist "%TEMP%\_kn_dlldir.txt" set /p PY_DLL_DIR=<"%TEMP%\_kn_dlldir.txt"
@@ -48,7 +48,7 @@ REM The driver shipped inside the release only works offline while its major
 REM version matches the user's Edge. If it falls behind, every launch quietly
 REM falls back to downloading a driver, which is exactly what breaks on
 REM locked-down networks. Warn before a release is built with a stale driver.
-REM --update: 뒤처졌으면 최신 드라이버를 받아 자동으로 교체한다.
+REM --update: fetch and swap in the latest driver when ours is behind.
 echo 0. Checking bundled Edge WebDriver version...
 "%BUILD_PY%" "%SCRIPT_DIR%check_driver.py" "%DRIVER_PATH%" --update
 if errorlevel 1 (
