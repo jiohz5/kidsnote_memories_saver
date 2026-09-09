@@ -2049,3 +2049,318 @@ def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None,
         log(f"상세 페이지 이동 중 오류: {e}")
         save_debug_snapshot(driver, f"Error_Navigating_{mem['type']}", status_callback, mem=mem)
         return False
+
+
+# ---------------------------------------------------------------------------
+# 로그인과 아이 목록
+#
+# 원래 GUI(_init_driver) 안에서 직접 하던 일이다. 화면을 그리는 코드와 키즈노트
+# 마크업을 읽는 코드가 한 함수에 섞여 있으면, 사이트가 바뀔 때 고칠 곳을 두 파일에서
+# 찾아야 한다. 이 프로그램에서 가장 자주 일어나는 유지보수가 그것이라 웹을 읽는 일은
+# 전부 이쪽으로 모은다.
+# ---------------------------------------------------------------------------
+
+# 아이 목록의 작은 아바타(선택용). 클릭하면 큰 아바타가 활성화된다.
+CHILD_AVATAR_CSS = "span[role='img'][size='36']"
+# 현재 선택된 아이의 큰 아바타. 이것이 떠야 얼굴 사진 주소가 CSS에 주입된다.
+ACTIVE_AVATAR_CSS = "span[role='img'][size='65']"
+
+# 작은 아바타 옆에서 이름과 나이를 읽어 온다.
+_CHILD_NAMES_JS = """
+var results = [];
+var spans = document.querySelectorAll("span[role='img'][size='36']");
+for (var i = 0; i < spans.length; i++) {
+  var container = spans[i].parentElement.parentElement;
+  var pTags = container.querySelectorAll("p");
+  if (pTags.length >= 2) {
+    results.push([pTags[0].textContent.trim(), pTags[1].textContent.trim()]);
+  }
+}
+return results;
+"""
+
+# 활성 아바타에서 얼굴 사진 주소를 뽑는다.
+# img 태그가 있으면 그쪽이 정확하고, 없으면 배경 이미지 CSS에서 긁는다.
+_ACTIVE_AVATAR_URL_JS = """
+var s = document.querySelector("span[role='img'][size='65']");
+if (!s) { return ""; }
+var img = s.querySelector("img");
+if (img && (img.currentSrc || img.src)) { return img.currentSrc || img.src; }
+var bg = window.getComputedStyle(s).backgroundImage || "";
+var match = bg.match(/url\(["']?([^"')]+)["']?\)/);
+return match ? match[1] : "";
+"""
+
+# 목록에 쓰이는 작은 썸네일 주소. 큰 것으로 바꿔야 화면에서 뭉개지지 않는다.
+_THUMB_SIZES = ('img_36x36.jpg', 'img_65x65.jpg', 'img_130x130.jpg', 'img_240x240.jpg')
+
+
+def login(driver, username, password, status_callback=None,
+          field_timeout=90, verify_timeout=20):
+    """키즈노트에 로그인하고, 실제로 성공했는지 확인해서 알려준다.
+
+    성공 여부는 주소로 판단한다. 로그인 화면(/login)을 벗어났으면 성공이다.
+    예전에는 아이디와 비밀번호를 넣기만 하고 무조건 '로그인 성공'이라고 표시해서,
+    비밀번호가 틀려도 한참 진행하다 엉뚱한 화면에서 멈추는 바람에 원인을 알 수 없었다.
+
+    돌려주는 값은 (결과, 사유) 두 개다.
+        'ok'      로그인 성공
+        'failed'  아이디나 비밀번호가 틀린 것으로 보임 (로그인 화면에 머물러 있음)
+        'error'   로그인 화면 자체를 못 띄움 (네트워크 지연 등). 사유가 함께 온다.
+    """
+    def log(msg):
+        if status_callback:
+            status_callback(msg)
+
+    try:
+        driver.set_page_load_timeout(120)
+        driver.get("https://www.kidsnote.com/login")
+        user_field = WebDriverWait(driver, field_timeout).until(
+            EC.presence_of_element_located((By.NAME, "username")))
+    except Exception as e:
+        return 'error', str(e)
+
+    try:
+        from selenium.webdriver.common.keys import Keys
+        pass_field = driver.find_element(By.NAME, "password")
+        user_field.send_keys(username)
+        pass_field.send_keys(password)
+        pass_field.send_keys(Keys.RETURN)
+    except Exception as e:
+        return 'error', str(e)
+
+    log("로그인 확인 중...")
+    try:
+        WebDriverWait(driver, verify_timeout).until(
+            lambda d: "/login" not in d.current_url)
+    except Exception:
+        return 'failed', ''
+    return 'ok', ''
+
+
+def upgrade_thumbnail_url(url, size=240):
+    """작은 썸네일 주소를 더 큰 해상도 주소로 바꾼다. 해당 없으면 그대로 둔다."""
+    if not url:
+        return url
+    for thumb in _THUMB_SIZES:
+        url = url.replace(thumb, 'img_%dx%d.jpg' % (size, size))
+    return url
+
+
+def _profile_url_candidates(driver, primary_url, fallback_url):
+    """얼굴 사진을 받아 볼 주소 후보를 큰 해상도부터 만든다.
+
+    같은 사진이라도 해상도별로 주소가 따로 있는데 어느 것이 살아 있는지는 받아 봐야 안다.
+    다만 너무 많이 시도하면 사내망처럼 막힌 환경에서 아이마다 수십 초씩 잡아먹으므로
+    셋에서 끊는다.
+    """
+    candidates = []
+    for base_url in (primary_url, fallback_url):
+        if not base_url:
+            continue
+        normalized = normalize_media_url(driver, base_url)
+        if normalized and normalized not in candidates:
+            candidates.append(normalized)
+        for size in (480, 360, 240):
+            upgraded = upgrade_thumbnail_url(normalized, size)
+            if upgraded and upgraded not in candidates:
+                candidates.append(upgraded)
+    return candidates[:3]
+
+
+def _fetch_profile_bytes(driver, candidates, timeout=12):
+    """후보 주소를 순서대로 시도해 얼굴 사진을 base64로 받아 온다.
+
+    브라우저 fetch를 먼저 쓴다. 사내망 프록시도 브라우저 네트워크는 대개 열려 있고
+    원본 화질을 그대로 받을 수 있기 때문이다. 안 되면 파이썬 requests 세션으로 넘어간다.
+    """
+    for url in candidates:
+        try:
+            data, _status = _browser_fetch_media(driver, url, timeout=timeout)
+            if data:
+                return base64.b64encode(data).decode('utf-8')
+        except Exception:
+            continue
+
+    for url in candidates:
+        try:
+            data, _ct = fetch_bytes_with_browser_session(driver, url, timeout=3)
+            if data:
+                return base64.b64encode(data).decode('utf-8')
+        except Exception:
+            continue
+    return ""
+
+
+def fetch_children(driver, status_callback=None, progress_callback=None,
+                   log_callback=None, max_image_failures=2):
+    """로그인한 계정의 아이 목록을 얼굴 사진과 함께 읽어 온다.
+
+    얼굴 사진은 레이지 로딩이라 그냥은 주소를 알 수 없다. 아이를 클릭해서 큰 아바타가
+    활성화되어야 비로소 CSS에 주소가 들어간다. 그래서 아이마다 클릭 → 주소 추출 →
+    내려받기 순서로 진행한다.
+
+    내려받기가 연달아 실패하면(max_image_failures) 이후로는 시도하지 않는다.
+    사내망에서 CDN이 막혀 있으면 아이마다 수십 초씩 기다리게 되는데, 얼굴 사진이 없어도
+    프로그램을 쓰는 데는 지장이 없기 때문이다. 이때도 화면에 보이는 아바타를 캡처해
+    두므로 대개 얼굴은 뜬다.
+
+    progress_callback(이름, 현재번호, 전체수) 로 진행 상황을 알린다.
+
+    돌려주는 값은 아이마다 다음을 담은 목록이다.
+        text     화면에 보일 '이름 생년월일 (나이)'
+        elem     이 아이를 고를 때 클릭할 요소
+        img_b64  얼굴 사진 (없으면 None)
+    """
+    def log(msg):
+        if status_callback:
+            status_callback(msg)
+
+    def debug(msg):
+        if log_callback:
+            log_callback(msg)
+
+    # 아이 목록은 서비스 홈에만 있다. 다른 화면에 있으면 먼저 홈으로 돌아간다.
+    if "kidsnote.com/service" not in (driver.current_url or ""):
+        driver.get("https://www.kidsnote.com/service")
+    wait_css(driver, "span[role='img']", timeout=10)
+
+    # 큰 아바타가 뜰 때까지 기다린다. 이게 있어야 얼굴 사진 주소를 읽을 수 있다.
+    try:
+        WebDriverWait(driver, 60).until(
+            EC.presence_of_element_located((By.XPATH, "//*[@size='65' and @role='img']")))
+        time.sleep(1)   # 이름과 나이 텍스트가 뒤따라 그려지는 시간
+    except Exception:
+        pass
+
+    try:
+        name_array = driver.execute_script(_CHILD_NAMES_JS) or []
+        click_elems = driver.find_elements(By.CSS_SELECTOR, CHILD_AVATAR_CSS)
+    except Exception as e:
+        debug("Child list scrape failed: %s" % type(e).__name__)
+        return []
+
+    children = []
+    seen = set()
+    failure_streak = 0
+
+    for idx, name_info in enumerate(name_array):
+        try:
+            name, age = name_info
+        except (TypeError, ValueError):
+            continue
+        if not name or not age:
+            continue
+
+        text_val = "%s %s" % (name, age)
+        if text_val in seen:
+            continue
+        seen.add(text_val)
+
+        if progress_callback:
+            progress_callback(name, idx + 1, len(name_array))
+
+        # 이 아이를 클릭해 큰 아바타를 활성화시킨다 (그래야 사진 주소가 생긴다)
+        if idx < len(click_elems):
+            try:
+                driver.execute_script("arguments[0].click();", click_elems[idx])
+                time.sleep(1.0)     # CSS에 주소가 주입되는 시간
+            except Exception:
+                pass
+
+        # 활성화된 아바타에서 사진 주소를 읽는다
+        url = orig_url = ""
+        try:
+            raw = driver.execute_script(_ACTIVE_AVATAR_URL_JS) or ""
+        except Exception:
+            raw = ""
+        if raw and raw != "none":
+            if raw.startswith(("http", "//", "/")):
+                url = normalize_media_url(driver, raw)
+            elif "url(" in raw:
+                start = raw.index("url(") + 4
+                end = raw.index(")", start)
+                url = normalize_media_url(driver, raw[start:end].strip('"').strip("'"))
+            orig_url = url
+            url = upgrade_thumbnail_url(url)
+
+        # 네트워크가 막혀도 얼굴이 뜨도록 화면에 보이는 아바타를 캡처해 둔다
+        shot_b64 = ""
+        try:
+            avatar = driver.find_element(By.CSS_SELECTOR, ACTIVE_AVATAR_CSS)
+            try:
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", avatar)
+                time.sleep(0.2)
+            except Exception:
+                pass
+            shot_b64 = avatar.screenshot_as_base64 or ""
+        except Exception as e:
+            # 로그에 아이 이름을 남기지 않는다 (개인정보) - 순번으로만 기록
+            debug("Profile avatar capture failed for child #%d: %s" % (idx + 1, type(e).__name__))
+
+        img_b64 = None
+        if url and failure_streak < max_image_failures:
+            img_b64 = _fetch_profile_bytes(
+                driver, _profile_url_candidates(driver, url, orig_url)) or None
+            failure_streak = 0 if img_b64 else failure_streak + 1
+
+        # 원본을 못 받았으면 화면 캡처본으로 대신한다
+        if not img_b64 and shot_b64:
+            img_b64 = shot_b64
+
+        # 진단(복사용): 이 아이의 프로필 확보 결과를 한 줄로 남긴다
+        source = "없음"
+        if img_b64:
+            source = "화면캡처" if img_b64 == shot_b64 else "네트워크"
+        log("[KN-DIAG] 프로필(%s) %s | 방식=%s | URL=%s | 캡처=%s" % (
+            name, "성공" if img_b64 else "실패", source,
+            "있음" if url else "없음", "있음" if shot_b64 else "없음"))
+
+        children.append({
+            "text": text_val,
+            "elem": click_elems[idx] if idx < len(click_elems) else None,
+            "img_b64": img_b64,
+        })
+
+    return children
+
+
+# 이름이 보이는 아바타를 찾아 클릭한다. 아이 전환은 React 상태 변경이라
+# 주소를 바꾸는 것으로는 되지 않고 실제로 눌러야 한다.
+_SELECT_CHILD_JS = """
+var target = arguments[0];
+var spans = document.querySelectorAll("span[role='img']");
+for (var i = 0; i < spans.length; i++) {
+  var parent = spans[i].parentElement.parentElement;
+  if (parent && parent.innerText && parent.innerText.includes(target)) {
+    spans[i].click();
+    return true;
+  }
+}
+return false;
+"""
+
+
+def select_child(driver, child_name, status_callback=None):
+    """아이 목록에서 해당 아이를 눌러 활성 계정을 바꾼다.
+
+    서비스 홈이 아닌 화면에서 누르면 상태가 꼬이므로 먼저 홈으로 되돌린다.
+    누른 뒤에는 React가 화면을 다시 그릴 시간을 준다.
+
+    찾아서 눌렀으면 True. 이름이 목록에 없으면 False.
+    """
+    def log(msg):
+        if status_callback:
+            status_callback(msg)
+
+    if "kidsnote.com/service" not in (driver.current_url or ""):
+        driver.get("https://www.kidsnote.com/service")
+        time.sleep(1.5)
+
+    clicked = bool(driver.execute_script(_SELECT_CHILD_JS, child_name))
+    if not clicked:
+        log("DEBUG: 아이 목록에서 해당 이름을 찾지 못했습니다.")
+        return False
+
+    time.sleep(2)   # React 상태 변경 후 렌더링 대기
+    return True

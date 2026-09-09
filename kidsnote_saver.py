@@ -1481,11 +1481,7 @@ class KidsnoteApp(QtWidgets.QWidget):
                 except Exception:
                     pass
                 self.driver = None
-            from selenium.webdriver.common.by import By
-            from selenium.webdriver.support.ui import WebDriverWait
-            from selenium.webdriver.support import expected_conditions as EC
-            from selenium.webdriver.common.keys import Keys
-            
+
             options = webdriver.EdgeOptions()
             options.add_argument('--window-size=1100,900')
             # 윈도우 잔류 프로세스로 인한 PyInstaller 임시폴더(_MEI) 삭제 오류 방지를 위해 detach 해제
@@ -1509,49 +1505,29 @@ class KidsnoteApp(QtWidgets.QWidget):
             except Exception:
                 pass
 
-            try:
-                self.driver.set_page_load_timeout(120)
-                self.driver.get("https://www.kidsnote.com/login")
-                
-                # Wait for login fields and fill them
-                wait = WebDriverWait(self.driver, 90)
-                user_field = wait.until(EC.presence_of_element_located((By.NAME, "username")))
-            except Exception as init_e:
-                self.update_status(f"로그인 페이지 로딩 실패: 네트워크 지연 ({init_e})")
+            self._update_overlay_text("🔐 로그인 결과를 확인하는 중입니다...")
+            result, reason = manager.login(self.driver, username, password,
+                                           status_callback=self.update_status)
+
+            if result == 'error':
+                self.update_status(f"로그인 페이지 로딩 실패: 네트워크 지연 ({reason})")
                 self.run_on_ui_thread(lambda: self.login_btn.setText("로그인 및 시작"))
                 self.enable_widget(self.login_btn, True)
                 self._hide_overlay()
                 if self.driver:
-                    try: self.driver.quit()
-                    except: pass
+                    try:
+                        self.driver.quit()
+                    except Exception:
+                        pass
                     self.driver = None
                 try:
                     import subprocess
                     subprocess.run(["taskkill", "/f", "/t", "/im", "msedgedriver.exe"], shell=False, creationflags=0x08000000)
-                except: pass
+                except Exception:
+                    pass
                 return
 
-            pass_field = self.driver.find_element(By.NAME, "password")
-            
-            user_field.send_keys(username)
-            pass_field.send_keys(password)
-            pass_field.send_keys(Keys.RETURN) # Auto-submit
-
-            self.update_status("로그인 확인 중...")
-            self._update_overlay_text("🔐 로그인 결과를 확인하는 중입니다...")
-
-            # 로그인 성공 여부를 실제로 확인한다.
-            # (예전에는 무조건 '로그인 성공'이라고 표시해, 비밀번호가 틀려도 계속 진행하다
-            #  나중에 엉뚱한 화면에서 실패하는 바람에 원인을 알 수 없었다)
-            import time
-            login_ok = False
-            try:
-                WebDriverWait(self.driver, 20).until(lambda d: "/login" not in d.current_url)
-                login_ok = True
-            except Exception:
-                login_ok = False
-
-            if not login_ok:
+            if result != 'ok':
                 write_app_log("Login appears to have failed (still on /login)")
                 self.run_on_ui_thread(self._hide_overlay)
                 self.run_on_ui_thread(lambda: self.login_btn.setText("🔐 키즈노트 로그인 열기"))
@@ -1576,194 +1552,20 @@ class KidsnoteApp(QtWidgets.QWidget):
             self.run_on_ui_thread(self._show_stage2_lock_overlay)
 
             self.run_on_ui_thread(lambda: self.login_btn.setText("✅ 로그인 완료"))
-            if "kidsnote.com/service" not in self.driver.current_url:
-                self.driver.get("https://www.kidsnote.com/service")
-            # 프로필 아바타가 렌더링되는 즉시 진행 (최대 10초)
-            manager.wait_css(self.driver, "span[role='img']", timeout=10)
 
-            # Wait until profile section loads (Check for size 65 active avatar)
-            try:
-                WebDriverWait(self.driver, 60).until(EC.presence_of_element_located((By.XPATH, "//*[@size='65' and @role='img']")))
-                time.sleep(1) # 부가 컴포넌트(이름/나이 텍스트) 렌더링 대기
-            except:
-                pass
-                
-            self.children_data = []
-            try:
-                # 자녀 이미지는 레이지 로딩 → 클릭하여 활성(size=65)되어야 비로소 CSS에 URL이 주입됨
-                # 전략: 각 자녀를 클릭→활성화→size=65 span의 computedStyle에서 URL 추출
-                
-                # 1단계: 자녀 이름/나이 목록만 먼저 수집
-                name_script = (
-                    'var results = [];'
-                    'var spans = document.querySelectorAll("span[role=\'img\'][size=\'36\']");'
-                    'for(var i=0; i<spans.length; i++){'
-                    '  var container = spans[i].parentElement.parentElement;'
-                    '  var pTags = container.querySelectorAll("p");'
-                    '  if(pTags.length >= 2) {'
-                    '    results.push([pTags[0].textContent.trim(), pTags[1].textContent.trim()]);'
-                    '  }'
-                    '}'
-                    'return results;'
-                )
-                name_array = self.driver.execute_script(name_script)
-                
-                from selenium.webdriver.common.by import By
-                click_elems = self.driver.find_elements(By.CSS_SELECTOR, "span[role='img'][size='36']")
-                
-                # 2단계: 각 자녀를 클릭하여 활성화 후 size=65 아바타의 URL 추출
-                import time as _time
-                child_array = []
-                for idx, name_info in enumerate(name_array):
-                    name, age = name_info
-                    if not name or not age:
-                        continue
-                    orig_url = ""
-                    
-                    # 해당 자녀 클릭하여 활성화
-                    self._update_overlay_text(f'📷 {name}의 프로필 사진 가져오는 중...\n({idx+1}/{len(name_array)})')
-                    if idx < len(click_elems):
-                        try:
-                            self.driver.execute_script("arguments[0].click();", click_elems[idx])
-                            _time.sleep(1.0)  # CSS 주입 대기
-                        except Exception as click_e:
-                            pass
-                    
-                    # 활성화된 size=65 span의 computedStyle에서 URL 추출
-                    url_script = (
-                        'var s = document.querySelector("span[role=\'img\'][size=\'65\']");'
-                        'if(!s) { return ""; }'
-                        'var img = s.querySelector("img");'
-                        'if(img && (img.currentSrc || img.src)) { return img.currentSrc || img.src; }'
-                        'var bg = window.getComputedStyle(s).backgroundImage || "";'
-                        'var match = bg.match(/url\\(["\\\']?([^"\\\')]+)["\\\']?\\)/);'
-                        'return match ? match[1] : "";'
-                    )
-                    bg_value = self.driver.execute_script(url_script)
-                    
-                    url = ""
-                    if bg_value and bg_value != "none":
-                        if bg_value.startswith("http") or bg_value.startswith("//") or bg_value.startswith("/"):
-                            url = manager.normalize_media_url(self.driver, bg_value)
-                            orig_url = url
-                        # url("https://...") 형태도 예전 코드와 호환
-                        elif "url(" in bg_value:
-                            start = bg_value.index("url(") + 4
-                            end = bg_value.index(")", start)
-                            url = manager.normalize_media_url(self.driver, bg_value[start:end].strip('"').strip("'"))
-                            orig_url = url
-                        # GUI 프로필 썸네일 해상도 개선 (원본 화질로 올림)
-                        if url:
-                            url = url.replace('img_36x36.jpg', 'img_240x240.jpg')
-                            url = url.replace('img_65x65.jpg', 'img_240x240.jpg')
-                            url = url.replace('img_130x130.jpg', 'img_240x240.jpg')
+            # 아이 목록과 얼굴 사진은 엔진이 읽어 온다.
+            # (키즈노트 마크업을 다루는 코드는 한곳에 모아 둔다)
+            def _profile_progress(name, current, total):
+                self._update_overlay_text(
+                    "📷 {}의 프로필 사진 가져오는 중...\n({}/{})".format(name, current, total))
 
-                    # 사내망 등에서 requests 직접 다운로드가 차단돼도 얼굴이 뜨도록,
-                    # 지금 활성화된 아바타 요소를 브라우저에서 직접 캡처해 둔다 (네트워크 불필요)
-                    shot_b64 = ""
-                    try:
-                        avatar_elem = self.driver.find_element(By.CSS_SELECTOR, "span[role='img'][size='65']")
-                        try:
-                            self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", avatar_elem)
-                            _time.sleep(0.2)
-                        except Exception:
-                            pass
-                        shot_b64 = avatar_elem.screenshot_as_base64 or ""
-                    except Exception as _shot_e:
-                        # 로그에 아이 이름을 남기지 않는다 (개인정보) — 순번으로만 기록
-                        write_app_log(f"Profile avatar capture failed for child #{idx + 1}: {type(_shot_e).__name__}")
+            self.children_data = manager.fetch_children(
+                self.driver,
+                status_callback=self.update_status,
+                progress_callback=_profile_progress,
+                log_callback=write_app_log,
+            )
 
-                    child_array.append([name, age, url, orig_url, shot_b64])
-                
-                
-                
-                seen_names = set()
-                img_fetch_fail_streak = 0  # 사내망 CDN 차단 시 자녀마다 수십 초씩 지연되는 것을 방지
-                for idx, item in enumerate(child_array):
-                    name, age, url, orig_url, shot_b64 = item
-                    if not name or not age:
-                        continue
-
-                    text_val = f"{name} {age}"
-
-                    if text_val not in seen_names:
-                        seen_names.add(text_val)
-                        img_b64 = None
-                        if url and img_fetch_fail_streak < 2:
-                            def profile_url_candidates(primary_url, fallback_url):
-                                candidates = []
-                                for base_url in [primary_url, fallback_url]:
-                                    if not base_url:
-                                        continue
-                                    normalized = manager.normalize_media_url(self.driver, base_url)
-                                    if normalized and normalized not in candidates:
-                                        candidates.append(normalized)
-                                    for size in [480, 360, 240]:
-                                        upgraded = normalized
-                                        for old in ['img_36x36.jpg', 'img_65x65.jpg', 'img_130x130.jpg', 'img_240x240.jpg']:
-                                            upgraded = upgraded.replace(old, f'img_{size}x{size}.jpg')
-                                        if upgraded and upgraded not in candidates:
-                                            candidates.append(upgraded)
-                                return candidates[:3]
-
-                            def fetch_img(req_url):
-                                import base64
-                                img_data, _ = manager.fetch_bytes_with_browser_session(self.driver, req_url, timeout=3)
-                                try:
-                                    from PIL import Image
-                                    import io
-                                    pil_img = Image.open(io.BytesIO(img_data))
-                                    pil_img.thumbnail((512, 512), Image.LANCZOS)
-                                    buf = io.BytesIO()
-                                    pil_img.save(buf, format='PNG')
-                                    img_data = buf.getvalue()
-                                except:
-                                    pass
-                                return base64.b64encode(img_data).decode('utf-8')
-
-                            candidates = profile_url_candidates(url, orig_url)
-                            # 1순위: 브라우저 fetch (사내망 프록시도 브라우저 네트워크는 대개 열림, 원본 화질)
-                            for candidate_url in candidates:
-                                try:
-                                    data, _status = manager._browser_fetch_media(self.driver, candidate_url, timeout=12)
-                                    if data:
-                                        import base64
-                                        img_b64 = base64.b64encode(data).decode('utf-8')
-                                        break
-                                except Exception:
-                                    continue
-                            # 2순위: 파이썬 requests 세션
-                            if not img_b64:
-                                for candidate_url in candidates:
-                                    try:
-                                        img_b64 = fetch_img(candidate_url)
-                                        if img_b64:
-                                            break
-                                    except Exception:
-                                        continue
-                            if img_b64:
-                                img_fetch_fail_streak = 0
-                            else:
-                                img_fetch_fail_streak += 1
-
-                        # 원본 다운로드 실패(사내망 차단 등) 시 브라우저 캡처본으로 대체
-                        if not img_b64 and shot_b64:
-                            img_b64 = shot_b64
-
-                        # 진단(복사용): 이 아이의 프로필 확보 결과를 한 줄로 남긴다
-                        got = "성공" if img_b64 else "실패"
-                        source = "네트워크" if (img_b64 and not shot_b64) else ("화면캡처" if img_b64 else "없음")
-                        self.update_status(f"[KN-DIAG] 프로필({name}) {got} | 방식={source} | URL={'있음' if url else '없음'} | 캡처={'있음' if shot_b64 else '없음'}")
-
-                        click_elem = click_elems[idx] if idx < len(click_elems) else None
-                        self.children_data.append({
-                            "text": text_val, 
-                            "elem": click_elem,
-                            "img_b64": img_b64
-                        })
-            except Exception as e:
-                pass
-                
             # Populate Combo Box
             write_app_log(f"Profile loading completed. children={len(getattr(self, 'children_data', []))}")
             self.run_on_ui_thread(self.populate_children_combo)
@@ -1843,28 +1645,8 @@ class KidsnoteApp(QtWidgets.QWidget):
 
     def _switch_child_worker(self, child_info, combo_text):
         try:
-            import time
             name = child_info['text'].split()[0]
-            script = """
-                var target = arguments[0];
-                var spans = document.querySelectorAll("span[role='img']");
-                for(var i=0; i<spans.length; i++){
-                    var parent = spans[i].parentElement.parentElement;
-                    if(parent && parent.innerText && parent.innerText.includes(target)) {
-                        spans[i].click();
-                        return true;
-                    }
-                }
-                return false;
-            """
-
-            # 강제로 최상단 서비스 홈으로 돌린 상태에서 클릭해야 꼬이지 않음
-            if "kidsnote.com/service" not in self.driver.current_url:
-                self.driver.get("https://www.kidsnote.com/service")
-                time.sleep(1.5)
-
-            self.driver.execute_script(script, name)
-            time.sleep(2)  # React 상태 변경 후 렌더링되도록 넉넉히 대기
+            manager.select_child(self.driver, name, status_callback=self.update_status)
 
             self.update_status(f"[{combo_text}] 계정으로 전환되었습니다. 이제 수집을 시작하세요.")
             self.run_on_ui_thread(
