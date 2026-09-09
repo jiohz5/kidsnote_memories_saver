@@ -34,6 +34,21 @@ today = QtCore.QDate.currentDate()
 w.period_combo.setCurrentText("최근 1주일")
 check("기간 프리셋: 시작일 = 오늘-7", w.start_date_edit.date() == today.addDays(-7))
 check("기간 프리셋에서도 날짜칸은 선택 가능", w.start_date_edit.isEnabled())
+
+# 이번 학년도: 어린이집·유치원의 한 해는 3월에 시작한다.
+# 1~2월에 올해 3월을 쓰면 아직 오지 않은 날짜가 되어 조회가 0건이 된다.
+w.period_combo.setCurrentText("이번 학년도 (3월~)")
+app.processEvents()
+check("학년도 프리셋: 3월 1일부터",
+      w.start_date_edit.date() == ks.KidsnoteApp._academic_year_start(today),
+      w.start_date_edit.date().toString("yyyy.MM.dd"))
+for probe, want_year in ((QtCore.QDate(2026, 9, 10), 2026),
+                         (QtCore.QDate(2026, 3, 1), 2026),
+                         (QtCore.QDate(2026, 2, 28), 2025),
+                         (QtCore.QDate(2026, 1, 5), 2025)):
+    got = ks.KidsnoteApp._academic_year_start(probe)
+    check("학년도 시작 %s -> %d.03.01" % (probe.toString("yyyy.MM.dd"), want_year),
+          got == QtCore.QDate(want_year, 3, 1), got.toString("yyyy.MM.dd"))
 w.period_combo.setCurrentText("직접 지정")
 check("직접 지정: 날짜칸 활성", w.start_date_edit.isEnabled())
 

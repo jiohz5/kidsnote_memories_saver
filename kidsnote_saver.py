@@ -3,6 +3,7 @@ import threading
 import os
 import codecs
 import datetime
+import re
 import faulthandler
 import traceback
 import shutil
@@ -803,10 +804,12 @@ class KidsnoteApp(QtWidgets.QWidget):
         period_layout.addWidget(QtWidgets.QLabel("조회 기간:"))
         self.period_combo = QtWidgets.QComboBox()
         self.period_combo.addItems([
-            "전체", "최근 1주일", "최근 1개월", "최근 3개월",
-            "최근 6개월", "최근 1년", "직접 지정",
+            "전체", "이번 학년도 (3월~)", "최근 1주일", "최근 1개월",
+            "최근 3개월", "최근 6개월", "최근 1년", "직접 지정",
         ])
-        self.period_combo.setCurrentText("최근 1주일")  # 기본: 최근 1주일 (부담 없는 범위)
+        # 기본은 이번 학년도. 부모가 '올해 우리 아이 기록'을 떠올릴 때의 범위와 같고,
+        # 시작과 끝이 분명해서 [전체]처럼 얼마나 걸릴지 모르는 상태로 두지 않는다.
+        self.period_combo.setCurrentText("이번 학년도 (3월~)")
         period_layout.addWidget(self.period_combo)
 
         # 날짜 범위 칸 — 프리셋 선택 시 자동 반영(비활성), '직접 지정' 선택 시 활성화
@@ -2048,10 +2051,57 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.end_date_edit.setEnabled(enabled)
         self.child_combo.setEnabled(enabled and bool(getattr(self, 'children_data', None)))
 
-    # 프리셋 텍스트 → 오늘로부터의 일수 (전체/직접 지정은 별도 처리)
+    # 프리셋 텍스트 → 오늘로부터의 일수 (전체/학년도/직접 지정은 별도 처리)
     _PERIOD_PRESET_DAYS = (
         ("1주일", 7), ("1개월", 30), ("3개월", 90), ("6개월", 180), ("1년", 365),
     )
+
+    @staticmethod
+    def _academic_year_start(today):
+        """이번 학년도가 시작된 날(3월 1일)을 돌려준다.
+
+        어린이집·유치원의 한 해는 3월에 시작해서 이듬해 2월에 끝난다.
+        그래서 1~2월에는 아직 '지난해 3월에 시작한 학년도' 안에 있다.
+        이때 올해 3월 1일을 쓰면 아직 오지 않은 날짜가 되어 조회 결과가 0건이 된다.
+        """
+        year = today.year() if today.month() >= 3 else today.year() - 1
+        return QtCore.QDate(year, 3, 1)
+
+    def _all_period_start(self):
+        """[전체]를 골랐을 때 날짜칸에 보여 줄 시작일.
+
+        [전체]는 실제로는 날짜로 거르지 않으므로(limit_date_str=None) 이 값은
+        화면에 보이기만 한다. 그래도 2000.01.01 처럼 아무 근거 없는 날짜를 두면
+        사용자가 '이 프로그램이 뭘 하려는 거지' 하고 헷갈린다.
+
+        아이가 태어나기 전의 알림장은 있을 수 없으므로 생년월일이 가장 정직한 시작점이다.
+        아직 로그인 전이라 아이 정보가 없으면 넉넉히 10년 전으로 둔다.
+        (키즈노트가 문을 연 해를 쓰는 방법도 있지만, 정확한 시점을 확인하지 못해
+         잘못된 연도를 코드에 박아 두지 않았다)
+        """
+        birth = self._selected_child_birth_date()
+        if birth and birth.isValid():
+            return birth
+        return QtCore.QDate.currentDate().addYears(-10)
+
+    def _selected_child_birth_date(self):
+        """콤보에 보이는 '최유찬 21.3.15. (5년 5개월)' 에서 생년월일을 읽는다.
+
+        두 자리 연도는 2000년대로 본다. 어린이집에 다니는 아이라 1900년대일 수 없다.
+        읽지 못하면 None을 돌려주고, 부르는 쪽이 대체값을 쓴다.
+        """
+        try:
+            text = self.child_combo.currentText()
+        except Exception:
+            return None
+        match = re.search(r'(\d{2,4})\.\s*(\d{1,2})\.\s*(\d{1,2})', text or '')
+        if not match:
+            return None
+        year, month, day = (int(g) for g in match.groups())
+        if year < 100:
+            year += 2000
+        date = QtCore.QDate(year, month, day)
+        return date if date.isValid() else None
 
     def on_period_changed(self):
         """조회 기간 콤보를 바꾸면 날짜칸에 해당 기간을 채워 넣는다.
@@ -2069,7 +2119,10 @@ class KidsnoteApp(QtWidgets.QWidget):
         try:
             self.end_date_edit.setDate(today)
             if text.startswith("전체"):
-                self.start_date_edit.setDate(QtCore.QDate(2000, 1, 1))
+                self.start_date_edit.setDate(self._all_period_start())
+                return
+            if text.startswith("이번 학년도"):
+                self.start_date_edit.setDate(self._academic_year_start(today))
                 return
             for keyword, preset_days in self._PERIOD_PRESET_DAYS:
                 if keyword in text:
