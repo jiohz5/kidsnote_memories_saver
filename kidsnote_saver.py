@@ -10,6 +10,7 @@ from PyQt6 import QtWidgets, QtCore, QtGui
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 import kidsnote_engine as manager
+import kidsnote_paths as paths
 
 APP_VERSION = "1.08"
 UPDATE_CHECK_REPO = "jiohz5/kidsnote_memories_saver"
@@ -116,22 +117,12 @@ class ScrapeThread(QtCore.QThread):
 
 
 def _safe_title_fragment(title, limit=30):
-    """게시물 제목을 파일명에 쓸 수 있는 짧은 조각으로 변환.
+    """게시물 제목을 파일명에 쓸 수 있는 짧은 조각으로 바꾼다.
 
-    윈도우 파일명 금지문자(\\ / : * ? " < > |)와 줄바꿈을 제거하고,
-    끝의 공백·마침표(윈도우에서 허용되지 않음)를 정리한 뒤 길이를 제한한다.
-    쓸 만한 글자가 남지 않으면 빈 문자열을 반환한다(그 경우 제목 없이 저장).
+    실제 규칙은 kidsnote_paths 에 있다. 이 이름은 기존 테스트와 호출부가
+    계속 쓰고 있어 얇은 위임으로 남겨 둔다.
     """
-    import re as _re
-    text = (title or "").strip()
-    if not text or text.startswith("제목 알 수 없음"):
-        return ""
-    text = text.replace("...", " ")
-    text = _re.sub(r'[\\/:*?"<>|\r\n\t]', " ", text)
-    text = _re.sub(r"\s+", " ", text).strip()
-    text = text[:limit].strip()
-    text = text.rstrip(". ")          # 윈도우는 마침표/공백으로 끝나는 이름을 허용하지 않음
-    return text
+    return paths.safe_title_fragment(title, limit)
 
 
 class CheckStateItem(QtWidgets.QTableWidgetItem):
@@ -234,6 +225,10 @@ class DownloadThread(QtCore.QThread):
                     self.status_signal.emit("알림장/앨범 다운로드가 중지되었습니다.")
                     break
 
+                # 아래 빈 폴더 정리는 try 바깥에 있다. 경로를 계산하기 전에 예외가 나면
+                # 앞 항목의 값이 남아 엉뚱한 폴더를 지울 수 있으므로 매 항목마다 지운다.
+                plan = None
+
                 try:
                     mem = dict(self.memories[idx])
                 except Exception:
@@ -258,79 +253,56 @@ class DownloadThread(QtCore.QThread):
                 )
 
                 try:
-                    raw_clean_date = re.sub(r'[\\/*?:"<>|]', "", mem.get('date', '')).strip().rstrip('.')
-
-                    # 날짜를 먼저 해석해 두고, 폴더명(YYYYMMDD)과 파일 접두사(YYMMDD)를 함께 만든다.
-                    # 점을 지운 문자열을 다시 파싱하면 '2026.7.4' 같은 경우 자릿수 경계가 모호해지므로
-                    # 파싱은 구분자가 살아 있는 원본으로 한다.
-                    _md = re.search(r'(\d{4})\.?\s*(\d{1,2})\.?\s*(\d{1,2})', raw_clean_date)
-                    _mk = re.search(r'(?:(\d{4})\s*년)?\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일', raw_clean_date)
-                    if _md:
-                        _y, _m, _d = _md.groups()
-                    elif _mk:
-                        _y = _mk.group(1) or datetime.date.today().year
-                        _m, _d = _mk.group(2), _mk.group(3)
-                    else:
-                        _y = _m = _d = None
-
-                    if _y and _m and _d:
-                        clean_date = f"{int(_y):04d}{int(_m):02d}{int(_d):02d}"   # 폴더: 20260714
-                        date_prefix = f"{str(_y)[-2:]}{int(_m):02d}{int(_d):02d}"  # 파일: 260714
-                    else:
-                        clean_date = raw_clean_date.replace('.', '') or raw_clean_date
-                        date_prefix = clean_date
+                    # 저장 위치와 이름을 정하는 규칙은 kidsnote_paths 에 모아 두었다.
+                    # (여기서는 계산된 경로로 실제 폴더를 만들고 옛 이름을 넘겨받는 일만 한다)
                     item_type = mem.get('type', '항목')
+                    post_date = paths.parse_post_date(mem.get('date', ''))
+                    clean_date = post_date.folder
 
-                    base_target_dir = os.path.join(self.target_dir, f"{self.profile_name}_{item_type}")
-                    os.makedirs(base_target_dir, exist_ok=True)
-
-                    # 예전 버전은 점이 있는 이름(2026.07.14)으로 폴더를 만들었다.
-                    # 같은 날짜가 두 폴더로 갈라지지 않도록, 옛 폴더가 있으면 새 이름으로 넘겨받는다.
-                    if not self.is_single_folder and raw_clean_date != clean_date:
-                        legacy_dir = os.path.join(base_target_dir, raw_clean_date)
-                        new_dir = os.path.join(base_target_dir, clean_date)
-                        if os.path.isdir(legacy_dir) and not os.path.exists(new_dir):
-                            try:
-                                os.rename(legacy_dir, new_dir)
-                                write_app_log(f"Renamed legacy date folder: {raw_clean_date} -> {clean_date}")
-                            except OSError:
-                                pass
-
-                    if self.is_stopped:
-                        self.status_signal.emit("알림장/앨범 다운로드가 중지되었습니다.")
-                        break
-
+                    # 같은 날짜·같은 유형에 글이 여럿이면 파일명에 순번을 붙여 구분한다
                     dt_key = (clean_date, item_type)
                     post_index = date_type_counts.get(dt_key, 0)
                     date_type_counts[dt_key] = post_index + 1
                     mem['post_index'] = post_index
+
+                    plan = paths.plan_save_paths(
+                        self.target_dir, self.profile_name, item_type, post_date,
+                        post_index=post_index, title=mem.get('title', ''),
+                        single_folder=self.is_single_folder, want_pdf=self.want_pdf,
+                    )
+                    os.makedirs(plan.type_dir, exist_ok=True)
+
+                    # 예전 버전은 점이 있는 이름(2026.07.14)으로 폴더를 만들었다.
+                    # 같은 날짜가 두 폴더로 갈라지지 않도록, 옛 폴더가 있으면 새 이름으로 넘겨받는다.
+                    if plan.legacy_date_dir and os.path.isdir(plan.legacy_date_dir) \
+                            and not os.path.exists(plan.date_dir):
+                        try:
+                            os.rename(plan.legacy_date_dir, plan.date_dir)
+                            write_app_log(f"Renamed legacy date folder: {post_date.raw} -> {clean_date}")
+                        except OSError:
+                            pass
+
+                    if self.is_stopped:
+                        self.status_signal.emit("알림장/앨범 다운로드가 중지되었습니다.")
+                        break
 
                     # PDF와 사진/동영상을 각각 독립적으로 저장한다.
                     # (둘 다 받는 모드에서는 같은 항목에 대해 두 번 호출되며, 저장 위치는 동일 폴더)
                     step_results = []
 
                     if self.want_pdf:
-                        prefix_str = f"{date_prefix}_{item_type}" if post_index == 0 else f"{date_prefix}_{item_type}_{post_index}"
-
-                        # 파일명에 제목 일부를 붙여 열어보지 않아도 내용을 알 수 있게 한다
-                        title_part = _safe_title_fragment(mem.get('title', ''))
-                        filename = f"{prefix_str}_{title_part}.pdf" if title_part else f"{prefix_str}.pdf"
-
-                        if self.is_single_folder:
-                            path = os.path.join(base_target_dir, filename)
-                        else:
-                            date_dir = os.path.join(base_target_dir, clean_date)
-                            os.makedirs(date_dir, exist_ok=True)
-                            path = os.path.join(date_dir, filename)
-                            # 예전 버전은 제목 없이 저장했다. 같은 게시물의 옛 파일이 있으면
-                            # 새 이름으로 바꿔서 같은 글이 두 벌로 쌓이는 것을 막는다.
-                            legacy_path = os.path.join(date_dir, f"{prefix_str}.pdf")
-                            if title_part and os.path.exists(legacy_path) and not os.path.exists(path):
-                                try:
-                                    os.replace(legacy_path, path)
-                                    write_app_log(f"Renamed legacy PDF to titled name: {os.path.basename(path)}")
-                                except OSError:
-                                    pass
+                        path = plan.pdf_path
+                        if plan.date_dir:
+                            os.makedirs(plan.date_dir, exist_ok=True)
+                        # 예전 버전은 제목 없이 저장했다. 같은 게시물의 옛 파일이 있으면
+                        # 새 이름으로 바꿔서 같은 글이 두 벌로 쌓이는 것을 막는다.
+                        if plan.legacy_pdf_path and os.path.exists(plan.legacy_pdf_path) \
+                                and not os.path.exists(path):
+                            try:
+                                os.replace(plan.legacy_pdf_path, path)
+                                write_app_log(f"Renamed legacy PDF to titled name: {os.path.basename(path)}")
+                            except OSError:
+                                pass
 
                         step_results.append(manager.download_item(
                             self.driver,
@@ -345,7 +317,7 @@ class DownloadThread(QtCore.QThread):
                         ))
 
                     if self.want_media and not self.is_stopped:
-                        post_dir = base_target_dir if self.is_single_folder else os.path.join(base_target_dir, clean_date)
+                        post_dir = plan.media_dir
                         os.makedirs(post_dir, exist_ok=True)
                         step_results.append(manager.download_item(
                             self.driver,
@@ -376,11 +348,10 @@ class DownloadThread(QtCore.QThread):
 
                 # 사진/동영상(또는 PDF)이 하나도 저장되지 않아 빈 날짜 폴더가 남았다면 제거해
                 # 탐색기에서 헷갈리지 않게 한다. 같은 날짜의 다른 글이 이미 저장했다면 폴더는 유지됨.
-                if not self.is_single_folder:
-                    date_dir = os.path.join(base_target_dir, clean_date)
+                if plan is not None and plan.date_dir:
                     try:
-                        if os.path.isdir(date_dir) and not os.listdir(date_dir):
-                            os.rmdir(date_dir)
+                        if os.path.isdir(plan.date_dir) and not os.listdir(plan.date_dir):
+                            os.rmdir(plan.date_dir)
                     except OSError:
                         pass
 
