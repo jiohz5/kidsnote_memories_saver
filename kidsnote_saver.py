@@ -380,6 +380,33 @@ class DownloadThread(QtCore.QThread):
             self.finished_signal.emit(self.target_dir, success_cnt, fail_cnt, self.is_stopped)
 
 
+class BackgroundTask(QtCore.QThread):
+    """함수 하나를 백그라운드에서 돌리는 일회용 스레드.
+
+    로그인, 아이 전환, 업데이트 확인처럼 화면을 멈추면 안 되는 일에 쓴다.
+    이 셋은 원래 daemon 스레드였는데, daemon은 창을 닫을 때 그냥 버려진다.
+    브라우저에 명령을 보내는 도중에 버려지면 msedgedriver 프로세스가 남고,
+    그것이 PyInstaller 임시폴더를 붙들어 '삭제 실패' 경고로 이어졌다.
+    QThread로 두면 종료할 때 끝나기를 기다릴 수 있다.
+
+    수집·다운로드는 진행률 표시와 중지가 필요해서 각자 전용 QThread를 쓴다.
+    여기 있는 것은 그런 것이 필요 없는, 시작하면 끝까지 가는 일들이다.
+    """
+
+    def __init__(self, fn, *args, **kwargs):
+        super().__init__(kwargs.pop('parent', None))
+        self._fn = fn
+        self._args = args
+
+    def run(self):
+        try:
+            self._fn(*self._args)
+        except Exception:
+            # 여기서 새는 예외는 Qt가 삼켜 버려 아무 흔적도 남지 않는다
+            write_app_log("Background task failed (%s):\n%s"
+                          % (getattr(self._fn, '__name__', '?'), traceback.format_exc()))
+
+
 class KidsnoteApp(QtWidgets.QWidget):
     ui_call_signal = QtCore.pyqtSignal(object)
 
@@ -394,13 +421,28 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.is_loading_memories = False
         self.load_finished_received = False
         self.download_thread = None
+        # 돌고 있는 백그라운드 작업들. 창을 닫을 때 여기 있는 것들이 끝나기를 기다린다.
+        self._background_tasks = []
         # 증분 백업: 이전에 성공적으로 받은 항목 id 목록 (로컬 저장)
         self.downloaded_ids = self._load_manifest()
         # 테이블 행 삽입 중 itemChanged 시그널로 인한 과도한 라벨 갱신 방지 플래그
         self._table_populating = False
         self.init_ui()
         # 새 버전 확인 (백그라운드, 실패해도 무시)
-        threading.Thread(target=self._check_update_worker, daemon=True).start()
+        self.run_in_background(self._check_update_worker)
+
+    def run_in_background(self, fn, *args):
+        """화면을 멈추지 않도록 함수를 백그라운드에서 돌린다.
+
+        만든 스레드를 목록에 들고 있는다. 참조를 놓으면 파이썬이 회수해 버려
+        돌던 작업이 알 수 없는 시점에 끊기고, 종료할 때 기다릴 수도 없다.
+        끝난 것들은 새 작업을 띄울 때 함께 정리한다.
+        """
+        self._background_tasks = [t for t in self._background_tasks if t.isRunning()]
+        task = BackgroundTask(fn, *args, parent=self)
+        self._background_tasks.append(task)
+        task.start()
+        return task
 
     # --- 증분 백업 기록(manifest) ---
     def _manifest_path(self):
@@ -1285,7 +1327,7 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.login_btn.setEnabled(False)
         self._window_geo_for_driver = (self.x(), self.y(), self.width(), self.height())
         self._show_overlay('🔐 키즈노트 브라우저를 여는 중...')
-        threading.Thread(target=self._init_driver, args=(username, password), daemon=True).start()
+        self.run_in_background(self._init_driver, username, password)
 
     def _start_edge_driver(self, options, bundled_driver_path):
         """Edge를 띄운다. 사용자 PC의 Edge와 맞는 드라이버부터 차례로 시도한다.
@@ -1486,7 +1528,7 @@ class KidsnoteApp(QtWidgets.QWidget):
         # 최대 페이지 로드 타임아웃(120초)까지 UI 전체가 얼어붙으므로 백그라운드로 이동
         self.child_combo.setEnabled(False)
         self.update_status(f"[{combo_text}] 계정으로 전환하는 중...")
-        threading.Thread(target=self._switch_child_worker, args=(child_info, combo_text), daemon=True).start()
+        self.run_in_background(self._switch_child_worker, child_info, combo_text)
 
     def _switch_child_worker(self, child_info, combo_text):
         try:
@@ -2446,6 +2488,9 @@ class KidsnoteApp(QtWidgets.QWidget):
                 finally:
                     self.driver = None
 
+        # 여기만 맨 스레드를 쓴다. 종료 중이라 Qt 이벤트 루프가 내려가는 중일 수 있고,
+        # driver.quit()이 응답하지 않아도 5초만 기다리고 넘어가야 하기 때문이다.
+        # (그 밖의 백그라운드 작업은 BackgroundTask 를 쓴다)
         import threading
         t = threading.Thread(target=quit_driver, daemon=True)
         t.start()
@@ -2493,6 +2538,17 @@ class KidsnoteApp(QtWidgets.QWidget):
             try:
                 if worker and worker.isRunning():
                     worker.wait(2000)
+            except Exception:
+                pass
+
+        # 로그인·아이전환·업데이트확인도 기다린다. 예전에는 daemon 스레드라 그냥
+        # 버려졌는데, 브라우저에 명령을 보내던 중이었다면 msedgedriver 프로세스가
+        # 남아 PyInstaller 임시폴더 삭제 실패 경고를 냈다.
+        # 위에서 드라이버를 이미 닫았으므로 대기 중이던 것들은 곧 예외로 깨어난다.
+        for task in getattr(self, '_background_tasks', []):
+            try:
+                if task.isRunning():
+                    task.wait(2000)
             except Exception:
                 pass
         event.accept()
