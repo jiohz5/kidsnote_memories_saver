@@ -3,6 +3,7 @@ import threading
 import os
 import codecs
 import datetime
+import re
 import faulthandler
 import traceback
 import shutil
@@ -10,6 +11,9 @@ from PyQt6 import QtWidgets, QtCore, QtGui
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 import kidsnote_engine as manager
+import kidsnote_paths as paths
+import edge_driver
+import kidsnote_settings
 
 APP_VERSION = "1.08"
 UPDATE_CHECK_REPO = "jiohz5/kidsnote_memories_saver"
@@ -92,16 +96,20 @@ class ScrapeThread(QtCore.QThread):
         try:
             memories = manager.fetch_memory_list(
                 self.driver,
-                status_callback=self.status_signal.emit,
-                item_found_callback=self.item_found_signal.emit,
-                check_stop_callback=self.check_stopped,
-                scrape_reports=self.scrape_reports,
-                scrape_albums=self.scrape_albums,
-                profile_found_callback=self.profile_signal.emit,
-                limit_date_str=self.limit_date_str,
-                child_name=self.child_name,
+                request=manager.ScrapeRequest(
+                    reports=self.scrape_reports,
+                    albums=self.scrape_albums,
+                    start_date=self.limit_date_str,
+                    end_date=self.end_date_str,
+                    child_name=self.child_name,
+                ),
+                callbacks=manager.ScrapeCallbacks(
+                    status=self.status_signal.emit,
+                    item_found=self.item_found_signal.emit,
+                    profile_found=self.profile_signal.emit,
+                    check_stop=self.check_stopped,
+                ),
                 result_info=self.result_info,
-                end_date_str=self.end_date_str
             )
             self.finished_signal.emit(memories)
         except Exception as e:
@@ -116,22 +124,12 @@ class ScrapeThread(QtCore.QThread):
 
 
 def _safe_title_fragment(title, limit=30):
-    """게시물 제목을 파일명에 쓸 수 있는 짧은 조각으로 변환.
+    """게시물 제목을 파일명에 쓸 수 있는 짧은 조각으로 바꾼다.
 
-    윈도우 파일명 금지문자(\\ / : * ? " < > |)와 줄바꿈을 제거하고,
-    끝의 공백·마침표(윈도우에서 허용되지 않음)를 정리한 뒤 길이를 제한한다.
-    쓸 만한 글자가 남지 않으면 빈 문자열을 반환한다(그 경우 제목 없이 저장).
+    실제 규칙은 kidsnote_paths 에 있다. 이 이름은 기존 테스트와 호출부가
+    계속 쓰고 있어 얇은 위임으로 남겨 둔다.
     """
-    import re as _re
-    text = (title or "").strip()
-    if not text or text.startswith("제목 알 수 없음"):
-        return ""
-    text = text.replace("...", " ")
-    text = _re.sub(r'[\\/:*?"<>|\r\n\t]', " ", text)
-    text = _re.sub(r"\s+", " ", text).strip()
-    text = text[:limit].strip()
-    text = text.rstrip(". ")          # 윈도우는 마침표/공백으로 끝나는 이름을 허용하지 않음
-    return text
+    return paths.safe_title_fragment(title, limit)
 
 
 class CheckStateItem(QtWidgets.QTableWidgetItem):
@@ -234,6 +232,10 @@ class DownloadThread(QtCore.QThread):
                     self.status_signal.emit("알림장/앨범 다운로드가 중지되었습니다.")
                     break
 
+                # 아래 빈 폴더 정리는 try 바깥에 있다. 경로를 계산하기 전에 예외가 나면
+                # 앞 항목의 값이 남아 엉뚱한 폴더를 지울 수 있으므로 매 항목마다 지운다.
+                plan = None
+
                 try:
                     mem = dict(self.memories[idx])
                 except Exception:
@@ -258,79 +260,56 @@ class DownloadThread(QtCore.QThread):
                 )
 
                 try:
-                    raw_clean_date = re.sub(r'[\\/*?:"<>|]', "", mem.get('date', '')).strip().rstrip('.')
-
-                    # 날짜를 먼저 해석해 두고, 폴더명(YYYYMMDD)과 파일 접두사(YYMMDD)를 함께 만든다.
-                    # 점을 지운 문자열을 다시 파싱하면 '2026.7.4' 같은 경우 자릿수 경계가 모호해지므로
-                    # 파싱은 구분자가 살아 있는 원본으로 한다.
-                    _md = re.search(r'(\d{4})\.?\s*(\d{1,2})\.?\s*(\d{1,2})', raw_clean_date)
-                    _mk = re.search(r'(?:(\d{4})\s*년)?\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일', raw_clean_date)
-                    if _md:
-                        _y, _m, _d = _md.groups()
-                    elif _mk:
-                        _y = _mk.group(1) or datetime.date.today().year
-                        _m, _d = _mk.group(2), _mk.group(3)
-                    else:
-                        _y = _m = _d = None
-
-                    if _y and _m and _d:
-                        clean_date = f"{int(_y):04d}{int(_m):02d}{int(_d):02d}"   # 폴더: 20260714
-                        date_prefix = f"{str(_y)[-2:]}{int(_m):02d}{int(_d):02d}"  # 파일: 260714
-                    else:
-                        clean_date = raw_clean_date.replace('.', '') or raw_clean_date
-                        date_prefix = clean_date
+                    # 저장 위치와 이름을 정하는 규칙은 kidsnote_paths 에 모아 두었다.
+                    # (여기서는 계산된 경로로 실제 폴더를 만들고 옛 이름을 넘겨받는 일만 한다)
                     item_type = mem.get('type', '항목')
+                    post_date = paths.parse_post_date(mem.get('date', ''))
+                    clean_date = post_date.folder
 
-                    base_target_dir = os.path.join(self.target_dir, f"{self.profile_name}_{item_type}")
-                    os.makedirs(base_target_dir, exist_ok=True)
-
-                    # 예전 버전은 점이 있는 이름(2026.07.14)으로 폴더를 만들었다.
-                    # 같은 날짜가 두 폴더로 갈라지지 않도록, 옛 폴더가 있으면 새 이름으로 넘겨받는다.
-                    if not self.is_single_folder and raw_clean_date != clean_date:
-                        legacy_dir = os.path.join(base_target_dir, raw_clean_date)
-                        new_dir = os.path.join(base_target_dir, clean_date)
-                        if os.path.isdir(legacy_dir) and not os.path.exists(new_dir):
-                            try:
-                                os.rename(legacy_dir, new_dir)
-                                write_app_log(f"Renamed legacy date folder: {raw_clean_date} -> {clean_date}")
-                            except OSError:
-                                pass
-
-                    if self.is_stopped:
-                        self.status_signal.emit("알림장/앨범 다운로드가 중지되었습니다.")
-                        break
-
+                    # 같은 날짜·같은 유형에 글이 여럿이면 파일명에 순번을 붙여 구분한다
                     dt_key = (clean_date, item_type)
                     post_index = date_type_counts.get(dt_key, 0)
                     date_type_counts[dt_key] = post_index + 1
                     mem['post_index'] = post_index
+
+                    plan = paths.plan_save_paths(
+                        self.target_dir, self.profile_name, item_type, post_date,
+                        post_index=post_index, title=mem.get('title', ''),
+                        single_folder=self.is_single_folder, want_pdf=self.want_pdf,
+                    )
+                    os.makedirs(plan.type_dir, exist_ok=True)
+
+                    # 예전 버전은 점이 있는 이름(2026.07.14)으로 폴더를 만들었다.
+                    # 같은 날짜가 두 폴더로 갈라지지 않도록, 옛 폴더가 있으면 새 이름으로 넘겨받는다.
+                    if plan.legacy_date_dir and os.path.isdir(plan.legacy_date_dir) \
+                            and not os.path.exists(plan.date_dir):
+                        try:
+                            os.rename(plan.legacy_date_dir, plan.date_dir)
+                            write_app_log(f"Renamed legacy date folder: {post_date.raw} -> {clean_date}")
+                        except OSError:
+                            pass
+
+                    if self.is_stopped:
+                        self.status_signal.emit("알림장/앨범 다운로드가 중지되었습니다.")
+                        break
 
                     # PDF와 사진/동영상을 각각 독립적으로 저장한다.
                     # (둘 다 받는 모드에서는 같은 항목에 대해 두 번 호출되며, 저장 위치는 동일 폴더)
                     step_results = []
 
                     if self.want_pdf:
-                        prefix_str = f"{date_prefix}_{item_type}" if post_index == 0 else f"{date_prefix}_{item_type}_{post_index}"
-
-                        # 파일명에 제목 일부를 붙여 열어보지 않아도 내용을 알 수 있게 한다
-                        title_part = _safe_title_fragment(mem.get('title', ''))
-                        filename = f"{prefix_str}_{title_part}.pdf" if title_part else f"{prefix_str}.pdf"
-
-                        if self.is_single_folder:
-                            path = os.path.join(base_target_dir, filename)
-                        else:
-                            date_dir = os.path.join(base_target_dir, clean_date)
-                            os.makedirs(date_dir, exist_ok=True)
-                            path = os.path.join(date_dir, filename)
-                            # 예전 버전은 제목 없이 저장했다. 같은 게시물의 옛 파일이 있으면
-                            # 새 이름으로 바꿔서 같은 글이 두 벌로 쌓이는 것을 막는다.
-                            legacy_path = os.path.join(date_dir, f"{prefix_str}.pdf")
-                            if title_part and os.path.exists(legacy_path) and not os.path.exists(path):
-                                try:
-                                    os.replace(legacy_path, path)
-                                    write_app_log(f"Renamed legacy PDF to titled name: {os.path.basename(path)}")
-                                except OSError:
-                                    pass
+                        path = plan.pdf_path
+                        if plan.date_dir:
+                            os.makedirs(plan.date_dir, exist_ok=True)
+                        # 예전 버전은 제목 없이 저장했다. 같은 게시물의 옛 파일이 있으면
+                        # 새 이름으로 바꿔서 같은 글이 두 벌로 쌓이는 것을 막는다.
+                        if plan.legacy_pdf_path and os.path.exists(plan.legacy_pdf_path) \
+                                and not os.path.exists(path):
+                            try:
+                                os.replace(plan.legacy_pdf_path, path)
+                                write_app_log(f"Renamed legacy PDF to titled name: {os.path.basename(path)}")
+                            except OSError:
+                                pass
 
                         step_results.append(manager.download_item(
                             self.driver,
@@ -345,7 +324,7 @@ class DownloadThread(QtCore.QThread):
                         ))
 
                     if self.want_media and not self.is_stopped:
-                        post_dir = base_target_dir if self.is_single_folder else os.path.join(base_target_dir, clean_date)
+                        post_dir = plan.media_dir
                         os.makedirs(post_dir, exist_ok=True)
                         step_results.append(manager.download_item(
                             self.driver,
@@ -376,11 +355,10 @@ class DownloadThread(QtCore.QThread):
 
                 # 사진/동영상(또는 PDF)이 하나도 저장되지 않아 빈 날짜 폴더가 남았다면 제거해
                 # 탐색기에서 헷갈리지 않게 한다. 같은 날짜의 다른 글이 이미 저장했다면 폴더는 유지됨.
-                if not self.is_single_folder:
-                    date_dir = os.path.join(base_target_dir, clean_date)
+                if plan is not None and plan.date_dir:
                     try:
-                        if os.path.isdir(date_dir) and not os.listdir(date_dir):
-                            os.rmdir(date_dir)
+                        if os.path.isdir(plan.date_dir) and not os.listdir(plan.date_dir):
+                            os.rmdir(plan.date_dir)
                     except OSError:
                         pass
 
@@ -406,6 +384,33 @@ class DownloadThread(QtCore.QThread):
             self.finished_signal.emit(self.target_dir, success_cnt, fail_cnt, self.is_stopped)
 
 
+class BackgroundTask(QtCore.QThread):
+    """함수 하나를 백그라운드에서 돌리는 일회용 스레드.
+
+    로그인, 아이 전환, 업데이트 확인처럼 화면을 멈추면 안 되는 일에 쓴다.
+    이 셋은 원래 daemon 스레드였는데, daemon은 창을 닫을 때 그냥 버려진다.
+    브라우저에 명령을 보내는 도중에 버려지면 msedgedriver 프로세스가 남고,
+    그것이 PyInstaller 임시폴더를 붙들어 '삭제 실패' 경고로 이어졌다.
+    QThread로 두면 종료할 때 끝나기를 기다릴 수 있다.
+
+    수집·다운로드는 진행률 표시와 중지가 필요해서 각자 전용 QThread를 쓴다.
+    여기 있는 것은 그런 것이 필요 없는, 시작하면 끝까지 가는 일들이다.
+    """
+
+    def __init__(self, fn, *args, **kwargs):
+        super().__init__(kwargs.pop('parent', None))
+        self._fn = fn
+        self._args = args
+
+    def run(self):
+        try:
+            self._fn(*self._args)
+        except Exception:
+            # 여기서 새는 예외는 Qt가 삼켜 버려 아무 흔적도 남지 않는다
+            write_app_log("Background task failed (%s):\n%s"
+                          % (getattr(self._fn, '__name__', '?'), traceback.format_exc()))
+
+
 class KidsnoteApp(QtWidgets.QWidget):
     ui_call_signal = QtCore.pyqtSignal(object)
 
@@ -420,13 +425,28 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.is_loading_memories = False
         self.load_finished_received = False
         self.download_thread = None
+        # 돌고 있는 백그라운드 작업들. 창을 닫을 때 여기 있는 것들이 끝나기를 기다린다.
+        self._background_tasks = []
         # 증분 백업: 이전에 성공적으로 받은 항목 id 목록 (로컬 저장)
         self.downloaded_ids = self._load_manifest()
         # 테이블 행 삽입 중 itemChanged 시그널로 인한 과도한 라벨 갱신 방지 플래그
         self._table_populating = False
         self.init_ui()
         # 새 버전 확인 (백그라운드, 실패해도 무시)
-        threading.Thread(target=self._check_update_worker, daemon=True).start()
+        self.run_in_background(self._check_update_worker)
+
+    def run_in_background(self, fn, *args):
+        """화면을 멈추지 않도록 함수를 백그라운드에서 돌린다.
+
+        만든 스레드를 목록에 들고 있는다. 참조를 놓으면 파이썬이 회수해 버려
+        돌던 작업이 알 수 없는 시점에 끊기고, 종료할 때 기다릴 수도 없다.
+        끝난 것들은 새 작업을 띄울 때 함께 정리한다.
+        """
+        self._background_tasks = [t for t in self._background_tasks if t.isRunning()]
+        task = BackgroundTask(fn, *args, parent=self)
+        self._background_tasks.append(task)
+        task.start()
+        return task
 
     # --- 증분 백업 기록(manifest) ---
     def _manifest_path(self):
@@ -611,37 +631,114 @@ class KidsnoteApp(QtWidgets.QWidget):
                 return os.path.join(sys._MEIPASS, 'kidsnote_icon.ico')
             return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'kidsnote_icon.ico')
 
-        app_icon = QtGui.QIcon(get_icon_path())
-        self.setWindowIcon(app_icon)
+        # 창과 트레이가 같은 아이콘을 쓰므로 인스턴스에 들고 있는다
+        self._app_icon = QtGui.QIcon(get_icon_path())
+        self.setWindowIcon(self._app_icon)
 
         # --- 레이아웃 설정 (메인 스크롤바를 없애기 위해 QScrollArea 제거하고 창 자체에 고정) ---
         main_layout = QtWidgets.QVBoxLayout(self)
         main_layout.setSpacing(FS(10))
 
-        # Config setup for Local ID/PW save
-        import configparser, base64
-        self.config = configparser.ConfigParser()
-        self.config_path = os.path.join(os.path.expanduser("~"), "Kidsnote_Config.ini")
-        # 설정 파일이 깨져 있어도(BOM 포함/다른 인코딩/손상) 프로그램이 못 뜨는 일은 없어야 한다.
-        # configparser.read()는 기본 로케일 인코딩으로 열기 때문에 BOM 하나만 있어도 예외로 죽는다.
-        for _enc in ("utf-8-sig", "utf-8", None):
-            try:
-                self.config.read(self.config_path, encoding=_enc)
-                break
-            except UnicodeDecodeError:
-                continue
-            except Exception:
-                write_app_log("Config read failed; starting with defaults:\n" + traceback.format_exc())
-                self.config = configparser.ConfigParser()
-                break
-        
-        saved_id = self.config.get('Login', 'id', fallback='')
-        saved_pw_stored = self.config.get('Login', 'pw', fallback='')
-        saved_remember = self.config.getboolean('Login', 'remember', fallback=False)
-        # DPAPI 암호화 저장값(신규)과 base64 저장값(구버전) 모두 지원
-        saved_pw = manager.unprotect_secret(saved_pw_stored)
+        # 아이디/비밀번호와 다운로드 옵션을 담아 두는 설정 파일
+        self.settings = kidsnote_settings.Settings(log=write_app_log)
 
-        # Login Info Group
+        self._build_login_group(main_layout, S, FS)
+
+        self._build_status_area(main_layout, S, FS)
+        self._build_collect_group(main_layout, S, FS)
+
+        # Table View Group
+        self._build_table_group(main_layout, S, FS)
+
+        # Download Options Layout
+        self._build_options_group(main_layout, S, FS)
+
+        # Download Button + Pause Button
+        download_row = QtWidgets.QHBoxLayout()
+        self.download_btn = QtWidgets.QPushButton('3. 선택한 항목 다운로드 시작')
+        self.download_btn.clicked.connect(self.start_download)
+        self.download_btn.setEnabled(False)
+        self.download_btn.setFixedHeight(FS(40))
+        self.download_btn.setStyleSheet(f"""
+            QPushButton {{ background-color: #FFC300; color: #2D3748; font-weight: bold; border-radius: {S(6)}px; }}
+            QPushButton:hover {{ background-color: #E6B000; }}
+            QPushButton:disabled {{ background-color: #FFDE59; color: #8A94A6; }}
+        """)
+        download_row.addWidget(self.download_btn, stretch=4)
+
+        self.pause_btn = QtWidgets.QPushButton('일시정지')
+        self.pause_btn.clicked.connect(self.toggle_pause)
+        self.pause_btn.setEnabled(False)
+        self.pause_btn.setFixedHeight(FS(40))
+        self.pause_btn.setToolTip("현재 항목까지 마친 뒤 잠시 멈춥니다. 다시 누르면 이어서 진행합니다.")
+        download_row.addWidget(self.pause_btn, stretch=1)
+        main_layout.addLayout(download_row)
+
+        # (QScrollArea 제거됨: 레이아웃이 self에 직접 연결되었으므로 추가 설정 불필요)
+
+        # --- 로딩 오버레이 ---
+        self._overlay = QtWidgets.QWidget(self)
+        self._overlay.setStyleSheet("background-color: rgba(0, 0, 0, 160);")
+        self._overlay_label = QtWidgets.QLabel("잠시만 기다려 주세요...", self._overlay)
+        self._overlay_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self._overlay_label.setStyleSheet(f"""
+            color: white;
+            font-size: {FS(18)}px;
+            font-weight: bold;
+            background: transparent;
+            padding: {FS(20)}px;
+        """)
+        self._overlay_label.setWordWrap(True)
+        overlay_layout = QtWidgets.QVBoxLayout(self._overlay)
+        overlay_layout.addStretch()
+        overlay_layout.addWidget(self._overlay_label)
+        overlay_layout.addStretch()
+        self._overlay.hide()
+
+        # --- 1단계 잠금 오버레이 (로그인 전 메뉴 접근 방지) ---
+        self.lock_overlay = QtWidgets.QWidget(self)
+        self.lock_overlay.setStyleSheet("background-color: rgba(240, 240, 240, 200);")
+        lock_label = QtWidgets.QLabel("위에서 '키즈노트 로그인 열기'를 먼저 완료해 주세요", self.lock_overlay)
+        lock_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        lock_label.setStyleSheet(f"color: #2D3748; font-size: {FS(18)}px; font-weight: bold; background: transparent;")
+        lock_layout = QtWidgets.QVBoxLayout(self.lock_overlay)
+        lock_layout.addWidget(lock_label)
+        self.lock_overlay.show()
+        self.lock_overlay.raise_()
+
+        # --- 2/3단계 잠금 오버레이 (추억 목록 불러오기 전 접근 방지) ---
+        self.stage2_lock_overlay = QtWidgets.QWidget(self)
+        self.stage2_lock_overlay.setStyleSheet("background-color: rgba(240, 240, 240, 210);")
+        stage2_lock_label = QtWidgets.QLabel("먼저 1단계에서 [추억 목록 불러오기]를 진행해 주세요", self.stage2_lock_overlay)
+        stage2_lock_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        stage2_lock_label.setStyleSheet(f"color: #2D3748; font-size: {FS(18)}px; font-weight: bold; background: transparent;")
+        stage2_lock_layout = QtWidgets.QVBoxLayout(self.stage2_lock_overlay)
+        stage2_lock_layout.addWidget(stage2_lock_label)
+        self.stage2_lock_overlay.hide()  # 초기에는 1단계 오버레이가 가리고 있으므로 숨김 (1단계 열릴 때 같이 켬)
+
+        # 이전 실행에서 쓰던 저장 경로·옵션 복원 (매번 다시 고르지 않도록)
+        self._restore_prefs()
+
+        # 아이디/비밀번호 입력 후 Enter로 바로 로그인 (마우스로 버튼을 찾지 않아도 되게)
+        self.id_input.returnPressed.connect(lambda: self.pw_input.setFocus())
+        self.pw_input.returnPressed.connect(
+            lambda: self.login_btn.click() if self.login_btn.isEnabled() else None
+        )
+
+        self._fit_window_to_contents()
+
+    def _build_login_group(self, main_layout, S, FS):
+        """로그인 정보 칸를 만들어 창에 붙인다.
+
+        S와 FS는 화면 해상도에 맞춘 크기·글꼴 스케일 함수다.
+        init_ui가 화면 크기를 보고 만들어 넘겨준다.
+        """
+        # 지난번에 저장해 둔 로그인 정보를 미리 채워 둔다.
+        # 비밀번호는 DPAPI 암호화 저장값(신규)과 base64 저장값(구버전)을 모두 받아들인다.
+        saved_id = self.settings.get('Login', 'id')
+        saved_pw = manager.unprotect_secret(self.settings.get('Login', 'pw'))
+        saved_remember = self.settings.get_bool('Login', 'remember')
+
         login_group = QtWidgets.QGroupBox("로그인 정보")
         login_layout = QtWidgets.QHBoxLayout()
         login_layout.setSpacing(FS(15))
@@ -700,9 +797,15 @@ class KidsnoteApp(QtWidgets.QWidget):
         login_group.setLayout(login_layout)
         main_layout.addWidget(login_group)
 
+    def _build_status_area(self, main_layout, S, FS):
+        """상태 문구와 진행률, 보조 버튼들를 만들어 창에 붙인다.
+
+        S와 FS는 화면 해상도에 맞춘 크기·글꼴 스케일 함수다.
+        init_ui가 화면 크기를 보고 만들어 넘겨준다.
+        """
         # Tray Icon for notifications
         self.tray_icon = QtWidgets.QSystemTrayIcon(self)
-        self.tray_icon.setIcon(app_icon)
+        self.tray_icon.setIcon(self._app_icon)
         self.tray_icon.show()
 
         # Status Label and Progress Bar
@@ -768,6 +871,13 @@ class KidsnoteApp(QtWidgets.QWidget):
         main_layout.addLayout(status_area_layout)
 
         # Collect Options Group (1단계: 아이 현황 및 수집 범위)
+
+    def _build_collect_group(self, main_layout, S, FS):
+        """1단계: 아이 현황과 수집 범위를 만들어 창에 붙인다.
+
+        S와 FS는 화면 해상도에 맞춘 크기·글꼴 스케일 함수다.
+        init_ui가 화면 크기를 보고 만들어 넘겨준다.
+        """
         collect_group = QtWidgets.QGroupBox("1단계: 아이 현황 및 수집 범위")
         collect_main_layout = QtWidgets.QHBoxLayout()
 
@@ -832,10 +942,12 @@ class KidsnoteApp(QtWidgets.QWidget):
         period_layout.addWidget(QtWidgets.QLabel("조회 기간:"))
         self.period_combo = QtWidgets.QComboBox()
         self.period_combo.addItems([
-            "전체", "최근 1주일", "최근 1개월", "최근 3개월",
-            "최근 6개월", "최근 1년", "직접 지정",
+            "전체", "이번 학년도 (3월~)", "최근 1주일", "최근 1개월",
+            "최근 3개월", "최근 6개월", "최근 1년", "직접 지정",
         ])
-        self.period_combo.setCurrentText("최근 1주일")  # 기본: 최근 1주일 (부담 없는 범위)
+        # 기본은 이번 학년도. 부모가 '올해 우리 아이 기록'을 떠올릴 때의 범위와 같고,
+        # 시작과 끝이 분명해서 [전체]처럼 얼마나 걸릴지 모르는 상태로 두지 않는다.
+        self.period_combo.setCurrentText("이번 학년도 (3월~)")
         period_layout.addWidget(self.period_combo)
 
         # 날짜 범위 칸 — 프리셋 선택 시 자동 반영(비활성), '직접 지정' 선택 시 활성화
@@ -923,7 +1035,12 @@ class KidsnoteApp(QtWidgets.QWidget):
         collect_group.setLayout(collect_main_layout)
         main_layout.addWidget(collect_group)
 
-        # Table View Group
+    def _build_table_group(self, main_layout, S, FS):
+        """2단계: 수집된 목록 표를 만들어 창에 붙인다.
+
+        S와 FS는 화면 해상도에 맞춘 크기·글꼴 스케일 함수다.
+        init_ui가 화면 크기를 보고 만들어 넘겨준다.
+        """
         table_group = QtWidgets.QGroupBox("2단계: 수집된 추억 목록 확인 및 선택")
         table_layout = QtWidgets.QVBoxLayout()
 
@@ -980,8 +1097,15 @@ class KidsnoteApp(QtWidgets.QWidget):
         
         table_group.setLayout(table_layout)
         main_layout.addWidget(table_group)
+        # 2단계 잠금 오버레이의 위치를 잡을 때 이 그룹의 좌표가 필요하다
+        self.table_group = table_group
 
-        # Download Options Layout
+    def _build_options_group(self, main_layout, S, FS):
+        """3단계: 저장 옵션를 만들어 창에 붙인다.
+
+        S와 FS는 화면 해상도에 맞춘 크기·글꼴 스케일 함수다.
+        init_ui가 화면 크기를 보고 만들어 넘겨준다.
+        """
         options_group = QtWidgets.QGroupBox("3단계: 최종 다운로드 설정")
         options_layout = QtWidgets.QVBoxLayout()
 
@@ -1088,83 +1212,6 @@ class KidsnoteApp(QtWidgets.QWidget):
         options_group.setLayout(options_layout)
         main_layout.addWidget(options_group)
 
-        # Download Button + Pause Button
-        download_row = QtWidgets.QHBoxLayout()
-        self.download_btn = QtWidgets.QPushButton('3. 선택한 항목 다운로드 시작')
-        self.download_btn.clicked.connect(self.start_download)
-        self.download_btn.setEnabled(False)
-        self.download_btn.setFixedHeight(FS(40))
-        self.download_btn.setStyleSheet(f"""
-            QPushButton {{ background-color: #FFC300; color: #2D3748; font-weight: bold; border-radius: {S(6)}px; }}
-            QPushButton:hover {{ background-color: #E6B000; }}
-            QPushButton:disabled {{ background-color: #FFDE59; color: #8A94A6; }}
-        """)
-        download_row.addWidget(self.download_btn, stretch=4)
-
-        self.pause_btn = QtWidgets.QPushButton('일시정지')
-        self.pause_btn.clicked.connect(self.toggle_pause)
-        self.pause_btn.setEnabled(False)
-        self.pause_btn.setFixedHeight(FS(40))
-        self.pause_btn.setToolTip("현재 항목까지 마친 뒤 잠시 멈춥니다. 다시 누르면 이어서 진행합니다.")
-        download_row.addWidget(self.pause_btn, stretch=1)
-        main_layout.addLayout(download_row)
-
-        # (QScrollArea 제거됨: 레이아웃이 self에 직접 연결되었으므로 추가 설정 불필요)
-
-        # --- 로딩 오버레이 ---
-        self._overlay = QtWidgets.QWidget(self)
-        self._overlay.setStyleSheet("background-color: rgba(0, 0, 0, 160);")
-        self._overlay_label = QtWidgets.QLabel("잠시만 기다려 주세요...", self._overlay)
-        self._overlay_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self._overlay_label.setStyleSheet(f"""
-            color: white;
-            font-size: {FS(18)}px;
-            font-weight: bold;
-            background: transparent;
-            padding: {FS(20)}px;
-        """)
-        self._overlay_label.setWordWrap(True)
-        overlay_layout = QtWidgets.QVBoxLayout(self._overlay)
-        overlay_layout.addStretch()
-        overlay_layout.addWidget(self._overlay_label)
-        overlay_layout.addStretch()
-        self._overlay.hide()
-
-        # --- 1단계 잠금 오버레이 (로그인 전 메뉴 접근 방지) ---
-        self.lock_overlay = QtWidgets.QWidget(self)
-        self.lock_overlay.setStyleSheet("background-color: rgba(240, 240, 240, 200);")
-        lock_label = QtWidgets.QLabel("위에서 '키즈노트 로그인 열기'를 먼저 완료해 주세요", self.lock_overlay)
-        lock_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        lock_label.setStyleSheet(f"color: #2D3748; font-size: {FS(18)}px; font-weight: bold; background: transparent;")
-        lock_layout = QtWidgets.QVBoxLayout(self.lock_overlay)
-        lock_layout.addWidget(lock_label)
-        self.lock_overlay.show()
-        self.lock_overlay.raise_()
-
-        # --- 2/3단계 잠금 오버레이 (추억 목록 불러오기 전 접근 방지) ---
-        self.stage2_lock_overlay = QtWidgets.QWidget(self)
-        self.stage2_lock_overlay.setStyleSheet("background-color: rgba(240, 240, 240, 210);")
-        stage2_lock_label = QtWidgets.QLabel("먼저 1단계에서 [추억 목록 불러오기]를 진행해 주세요", self.stage2_lock_overlay)
-        stage2_lock_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        stage2_lock_label.setStyleSheet(f"color: #2D3748; font-size: {FS(18)}px; font-weight: bold; background: transparent;")
-        stage2_lock_layout = QtWidgets.QVBoxLayout(self.stage2_lock_overlay)
-        stage2_lock_layout.addWidget(stage2_lock_label)
-        self.stage2_lock_overlay.hide()  # 초기에는 1단계 오버레이가 가리고 있으므로 숨김 (1단계 열릴 때 같이 켬)
-
-        # 위치 계산에 필요한 핵심 위젯 참조 저장
-        self.table_group = table_group
-
-        # 이전 실행에서 쓰던 저장 경로·옵션 복원 (매번 다시 고르지 않도록)
-        self._restore_prefs()
-
-        # 아이디/비밀번호 입력 후 Enter로 바로 로그인 (마우스로 버튼을 찾지 않아도 되게)
-        self.id_input.returnPressed.connect(lambda: self.pw_input.setFocus())
-        self.pw_input.returnPressed.connect(
-            lambda: self.login_btn.click() if self.login_btn.isEnabled() else None
-        )
-
-        self._fit_window_to_contents()
-
     def _fit_window_to_contents(self):
         """레이아웃이 실제로 요구하는 너비에 창을 맞춘다.
 
@@ -1268,226 +1315,44 @@ class KidsnoteApp(QtWidgets.QWidget):
         username = self.id_input.text().strip()
         password = self.pw_input.text().strip()
         
-        # Save credentials locally if checked
-        if not self.config.has_section('Login'):
-            self.config.add_section('Login')
+        # 체크한 경우에만 아이디/비밀번호를 남긴다.
+        # 비밀번호는 Windows DPAPI(사용자 계정 단위 암호화)로 저장 — base64 평문 저장 금지
         if self.chk_remember.isChecked():
-            # 비밀번호는 Windows DPAPI(사용자 계정 단위 암호화)로 저장 — base64 평문 저장 금지
-            self.config.set('Login', 'id', username)
-            self.config.set('Login', 'pw', manager.protect_secret(password))
-            self.config.set('Login', 'remember', 'True')
+            self.settings.set_many('Login', {
+                'id': username,
+                'pw': manager.protect_secret(password),
+                'remember': True,
+            })
         else:
-            self.config.set('Login', 'id', '')
-            self.config.set('Login', 'pw', '')
-            self.config.set('Login', 'remember', 'False')
-            
-        with open(self.config_path, 'w', encoding='utf-8') as f:
-            self.config.write(f)
+            self.settings.set_many('Login', {'id': '', 'pw': '', 'remember': False})
+        self.settings.save()
 
         self.status_label.setText('브라우저 여는 중 및 로그인 입력 중...')
         self.login_btn.setEnabled(False)
         self._window_geo_for_driver = (self.x(), self.y(), self.width(), self.height())
         self._show_overlay('🔐 키즈노트 브라우저를 여는 중...')
-        threading.Thread(target=self._init_driver, args=(username, password), daemon=True).start()
-
-    def _get_installed_edge_version(self):
-        edge_dirs = [
-            r"C:\Program Files (x86)\Microsoft\Edge\Application",
-            r"C:\Program Files\Microsoft\Edge\Application",
-        ]
-        versions = []
-        for edge_dir in edge_dirs:
-            try:
-                for name in os.listdir(edge_dir):
-                    parts = name.split(".")
-                    if len(parts) == 4 and all(part.isdigit() for part in parts):
-                        versions.append(name)
-            except Exception:
-                pass
-        if not versions:
-            return ""
-
-        def version_key(version):
-            return tuple(int(part) for part in version.split("."))
-
-        return sorted(versions, key=version_key)[-1]
-
-    def _get_driver_version(self, driver_path):
-        try:
-            import subprocess
-            result = subprocess.run(
-                [driver_path, "--version"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                creationflags=0x08000000,
-            )
-            import re
-            match = re.search(r"(\d+\.\d+\.\d+\.\d+)", result.stdout or result.stderr or "")
-            return match.group(1) if match else ""
-        except Exception:
-            return ""
-
-    def _is_compatible_edge_driver(self, edge_version, driver_version):
-        if not edge_version or not driver_version:
-            return False
-        return edge_version.split(".")[:3] == driver_version.split(".")[:3]
-
-    def _driver_cache_root(self):
-        return os.path.join(
-            os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
-            "KidsnoteMemoriesSaver",
-            "drivers",
-        )
-
-    def _edge_driver_package_name(self):
-        import platform
-        machine = platform.machine().lower()
-        if "arm64" in machine or "aarch64" in machine:
-            return "edgedriver_arm64.zip"
-        if machine in ("x86", "i386", "i686") or machine.endswith("32"):
-            return "edgedriver_win32.zip"
-        return "edgedriver_win64.zip"
-
-    def _find_cached_edge_driver(self, edge_version):
-        cache_root = self._driver_cache_root()
-        try:
-            for root, dirs, files in os.walk(cache_root):
-                if "msedgedriver.exe" not in files:
-                    continue
-                driver_path = os.path.join(root, "msedgedriver.exe")
-                if self._is_compatible_edge_driver(edge_version, self._get_driver_version(driver_path)):
-                    return driver_path
-        except Exception:
-            pass
-        return ""
-
-    def _edge_driver_download_versions(self, edge_version):
-        versions = [edge_version]
-        build_version = ".".join(edge_version.split(".")[:3])
-        latest_url = f"https://msedgedriver.microsoft.com/LATEST_RELEASE_{build_version}"
-        try:
-            import urllib.request
-            req = urllib.request.Request(latest_url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=8) as response:
-                latest = response.read().decode("utf-8", errors="ignore").strip()
-            if latest and latest not in versions:
-                versions.append(latest)
-        except Exception:
-            pass
-        return versions
-
-    def _cleanup_driver_cache(self, keep_driver_path):
-        cache_root = self._driver_cache_root()
-        try:
-            keep_dir = os.path.dirname(os.path.abspath(keep_driver_path)) if keep_driver_path else ""
-            version_dirs = []
-            for name in os.listdir(cache_root):
-                path = os.path.join(cache_root, name)
-                if os.path.isdir(path) and path != keep_dir:
-                    version_dirs.append((os.path.getmtime(path), path))
-            for _, path in sorted(version_dirs, reverse=True)[5:]:
-                import shutil
-                shutil.rmtree(path, ignore_errors=True)
-        except Exception:
-            pass
-
-    def _cache_driver_copy(self, source_path, cache_name):
-        if not source_path or not os.path.exists(source_path):
-            return ""
-        try:
-            driver_version = self._get_driver_version(source_path) or "unknown"
-            cache_dir = os.path.join(self._driver_cache_root(), cache_name, driver_version)
-            cached_path = os.path.join(cache_dir, "msedgedriver.exe")
-            if not os.path.exists(cached_path):
-                os.makedirs(cache_dir, exist_ok=True)
-                shutil.copy2(source_path, cached_path)
-            return cached_path
-        except Exception:
-            return source_path
-
-    def _download_edge_driver(self, edge_version):
-        if not edge_version:
-            return ""
-
-        cached_driver = self._find_cached_edge_driver(edge_version)
-        if cached_driver:
-            return cached_driver
-
-        package_name = self._edge_driver_package_name()
-        cache_dir = os.path.join(self._driver_cache_root(), edge_version)
-        driver_path = os.path.join(cache_dir, "msedgedriver.exe")
-        if self._is_compatible_edge_driver(edge_version, self._get_driver_version(driver_path)):
-            return driver_path
-
-        for download_version in self._edge_driver_download_versions(edge_version):
-            try:
-                import io
-                import zipfile
-                import urllib.request
-                os.makedirs(cache_dir, exist_ok=True)
-                url = f"https://msedgedriver.microsoft.com/{download_version}/{package_name}"
-                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                self.update_status(f"Edge {edge_version}에 맞는 WebDriver를 자동 다운로드 중...")
-                with urllib.request.urlopen(req, timeout=30) as response:
-                    data = response.read()
-                with zipfile.ZipFile(io.BytesIO(data)) as zf:
-                    exe_names = [name for name in zf.namelist() if os.path.basename(name).lower() == "msedgedriver.exe"]
-                    if not exe_names:
-                        continue
-                    with open(driver_path, "wb") as f:
-                        f.write(zf.read(exe_names[0]))
-                if self._is_compatible_edge_driver(edge_version, self._get_driver_version(driver_path)):
-                    self._cleanup_driver_cache(driver_path)
-                    return driver_path
-            except Exception:
-                continue
-        return ""
+        self.run_in_background(self._init_driver, username, password)
 
     def _start_edge_driver(self, options, bundled_driver_path):
+        """Edge를 띄운다. 사용자 PC의 Edge와 맞는 드라이버부터 차례로 시도한다.
+
+        어느 드라이버를 쓸지 고르는 규칙은 edge_driver 모듈에 있다.
+        (빌드 스크립트도 같은 모듈을 쓴다)
+        """
         from selenium.webdriver.edge.service import Service
         from selenium.common.exceptions import SessionNotCreatedException, WebDriverException
 
-        edge_version = self._get_installed_edge_version()
-        candidates = []
-
-        manual_driver_path = os.environ.get("KIDSNOTE_MSEDGEDRIVER", "")
-        if not manual_driver_path:
-            app_dir = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
-            manual_driver_path = os.path.join(app_dir, "msedgedriver.exe")
-
-        if manual_driver_path and os.path.exists(manual_driver_path):
-            if self._is_compatible_edge_driver(edge_version, self._get_driver_version(manual_driver_path)):
-                candidates.append(manual_driver_path)
-
-        bundled_driver_cached = self._cache_driver_copy(bundled_driver_path, "bundled")
-        bundled_version = self._get_driver_version(bundled_driver_cached)
-        if self._is_compatible_edge_driver(edge_version, bundled_version):
-            candidates.append(bundled_driver_cached)
-        else:
-            downloaded_driver = self._download_edge_driver(edge_version)
-            if downloaded_driver:
-                candidates.append(downloaded_driver)
-            if bundled_driver_cached and os.path.exists(bundled_driver_cached):
-                candidates.append(bundled_driver_cached)
-            if manual_driver_path and os.path.exists(manual_driver_path):
-                candidates.append(manual_driver_path)
-
-        tried = set()
         last_error = None
-        for driver_path in candidates:
-            if not driver_path or driver_path in tried:
-                continue
-            tried.add(driver_path)
+        for driver_path in edge_driver.driver_candidates(bundled_driver_path,
+                                                         status_callback=self.update_status):
             try:
-                return webdriver.Edge(service=Service(executable_path=driver_path), options=options)
-            except SessionNotCreatedException as e:
-                last_error = e
-                continue
-            except WebDriverException as e:
+                return webdriver.Edge(service=Service(executable_path=driver_path),
+                                      options=options)
+            except (SessionNotCreatedException, WebDriverException) as e:
                 last_error = e
                 continue
 
+        # 준비해 둔 것이 모두 실패하면 Selenium이 알아서 찾게 맡긴다
         self.update_status("내장 WebDriver로 실행하지 못해 Selenium Manager로 재시도합니다...")
         try:
             return webdriver.Edge(options=options)
@@ -1507,11 +1372,7 @@ class KidsnoteApp(QtWidgets.QWidget):
                 except Exception:
                     pass
                 self.driver = None
-            from selenium.webdriver.common.by import By
-            from selenium.webdriver.support.ui import WebDriverWait
-            from selenium.webdriver.support import expected_conditions as EC
-            from selenium.webdriver.common.keys import Keys
-            
+
             options = webdriver.EdgeOptions()
             options.add_argument('--window-size=1100,900')
             # 윈도우 잔류 프로세스로 인한 PyInstaller 임시폴더(_MEI) 삭제 오류 방지를 위해 detach 해제
@@ -1535,49 +1396,29 @@ class KidsnoteApp(QtWidgets.QWidget):
             except Exception:
                 pass
 
-            try:
-                self.driver.set_page_load_timeout(120)
-                self.driver.get("https://www.kidsnote.com/login")
-                
-                # Wait for login fields and fill them
-                wait = WebDriverWait(self.driver, 90)
-                user_field = wait.until(EC.presence_of_element_located((By.NAME, "username")))
-            except Exception as init_e:
-                self.update_status(f"로그인 페이지 로딩 실패: 네트워크 지연 ({init_e})")
+            self._update_overlay_text("🔐 로그인 결과를 확인하는 중입니다...")
+            result, reason = manager.login(self.driver, username, password,
+                                           status_callback=self.update_status)
+
+            if result == 'error':
+                self.update_status(f"로그인 페이지 로딩 실패: 네트워크 지연 ({reason})")
                 self.run_on_ui_thread(lambda: self.login_btn.setText("로그인 및 시작"))
                 self.enable_widget(self.login_btn, True)
                 self._hide_overlay()
                 if self.driver:
-                    try: self.driver.quit()
-                    except: pass
+                    try:
+                        self.driver.quit()
+                    except Exception:
+                        pass
                     self.driver = None
                 try:
                     import subprocess
                     subprocess.run(["taskkill", "/f", "/t", "/im", "msedgedriver.exe"], shell=False, creationflags=0x08000000)
-                except: pass
+                except Exception:
+                    pass
                 return
 
-            pass_field = self.driver.find_element(By.NAME, "password")
-            
-            user_field.send_keys(username)
-            pass_field.send_keys(password)
-            pass_field.send_keys(Keys.RETURN) # Auto-submit
-
-            self.update_status("로그인 확인 중...")
-            self._update_overlay_text("🔐 로그인 결과를 확인하는 중입니다...")
-
-            # 로그인 성공 여부를 실제로 확인한다.
-            # (예전에는 무조건 '로그인 성공'이라고 표시해, 비밀번호가 틀려도 계속 진행하다
-            #  나중에 엉뚱한 화면에서 실패하는 바람에 원인을 알 수 없었다)
-            import time
-            login_ok = False
-            try:
-                WebDriverWait(self.driver, 20).until(lambda d: "/login" not in d.current_url)
-                login_ok = True
-            except Exception:
-                login_ok = False
-
-            if not login_ok:
+            if result != 'ok':
                 write_app_log("Login appears to have failed (still on /login)")
                 self.run_on_ui_thread(self._hide_overlay)
                 self.run_on_ui_thread(lambda: self.login_btn.setText("🔐 키즈노트 로그인 열기"))
@@ -1602,194 +1443,20 @@ class KidsnoteApp(QtWidgets.QWidget):
             self.run_on_ui_thread(self._show_stage2_lock_overlay)
 
             self.run_on_ui_thread(lambda: self.login_btn.setText("✅ 로그인 완료"))
-            if "kidsnote.com/service" not in self.driver.current_url:
-                self.driver.get("https://www.kidsnote.com/service")
-            # 프로필 아바타가 렌더링되는 즉시 진행 (최대 10초)
-            manager.wait_css(self.driver, "span[role='img']", timeout=10)
 
-            # Wait until profile section loads (Check for size 65 active avatar)
-            try:
-                WebDriverWait(self.driver, 60).until(EC.presence_of_element_located((By.XPATH, "//*[@size='65' and @role='img']")))
-                time.sleep(1) # 부가 컴포넌트(이름/나이 텍스트) 렌더링 대기
-            except:
-                pass
-                
-            self.children_data = []
-            try:
-                # 자녀 이미지는 레이지 로딩 → 클릭하여 활성(size=65)되어야 비로소 CSS에 URL이 주입됨
-                # 전략: 각 자녀를 클릭→활성화→size=65 span의 computedStyle에서 URL 추출
-                
-                # 1단계: 자녀 이름/나이 목록만 먼저 수집
-                name_script = (
-                    'var results = [];'
-                    'var spans = document.querySelectorAll("span[role=\'img\'][size=\'36\']");'
-                    'for(var i=0; i<spans.length; i++){'
-                    '  var container = spans[i].parentElement.parentElement;'
-                    '  var pTags = container.querySelectorAll("p");'
-                    '  if(pTags.length >= 2) {'
-                    '    results.push([pTags[0].textContent.trim(), pTags[1].textContent.trim()]);'
-                    '  }'
-                    '}'
-                    'return results;'
-                )
-                name_array = self.driver.execute_script(name_script)
-                
-                from selenium.webdriver.common.by import By
-                click_elems = self.driver.find_elements(By.CSS_SELECTOR, "span[role='img'][size='36']")
-                
-                # 2단계: 각 자녀를 클릭하여 활성화 후 size=65 아바타의 URL 추출
-                import time as _time
-                child_array = []
-                for idx, name_info in enumerate(name_array):
-                    name, age = name_info
-                    if not name or not age:
-                        continue
-                    orig_url = ""
-                    
-                    # 해당 자녀 클릭하여 활성화
-                    self._update_overlay_text(f'📷 {name}의 프로필 사진 가져오는 중...\n({idx+1}/{len(name_array)})')
-                    if idx < len(click_elems):
-                        try:
-                            self.driver.execute_script("arguments[0].click();", click_elems[idx])
-                            _time.sleep(1.0)  # CSS 주입 대기
-                        except Exception as click_e:
-                            pass
-                    
-                    # 활성화된 size=65 span의 computedStyle에서 URL 추출
-                    url_script = (
-                        'var s = document.querySelector("span[role=\'img\'][size=\'65\']");'
-                        'if(!s) { return ""; }'
-                        'var img = s.querySelector("img");'
-                        'if(img && (img.currentSrc || img.src)) { return img.currentSrc || img.src; }'
-                        'var bg = window.getComputedStyle(s).backgroundImage || "";'
-                        'var match = bg.match(/url\\(["\\\']?([^"\\\')]+)["\\\']?\\)/);'
-                        'return match ? match[1] : "";'
-                    )
-                    bg_value = self.driver.execute_script(url_script)
-                    
-                    url = ""
-                    if bg_value and bg_value != "none":
-                        if bg_value.startswith("http") or bg_value.startswith("//") or bg_value.startswith("/"):
-                            url = manager.normalize_media_url(self.driver, bg_value)
-                            orig_url = url
-                        # url("https://...") 형태도 예전 코드와 호환
-                        elif "url(" in bg_value:
-                            start = bg_value.index("url(") + 4
-                            end = bg_value.index(")", start)
-                            url = manager.normalize_media_url(self.driver, bg_value[start:end].strip('"').strip("'"))
-                            orig_url = url
-                        # GUI 프로필 썸네일 해상도 개선 (원본 화질로 올림)
-                        if url:
-                            url = url.replace('img_36x36.jpg', 'img_240x240.jpg')
-                            url = url.replace('img_65x65.jpg', 'img_240x240.jpg')
-                            url = url.replace('img_130x130.jpg', 'img_240x240.jpg')
+            # 아이 목록과 얼굴 사진은 엔진이 읽어 온다.
+            # (키즈노트 마크업을 다루는 코드는 한곳에 모아 둔다)
+            def _profile_progress(name, current, total):
+                self._update_overlay_text(
+                    "📷 {}의 프로필 사진 가져오는 중...\n({}/{})".format(name, current, total))
 
-                    # 사내망 등에서 requests 직접 다운로드가 차단돼도 얼굴이 뜨도록,
-                    # 지금 활성화된 아바타 요소를 브라우저에서 직접 캡처해 둔다 (네트워크 불필요)
-                    shot_b64 = ""
-                    try:
-                        avatar_elem = self.driver.find_element(By.CSS_SELECTOR, "span[role='img'][size='65']")
-                        try:
-                            self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", avatar_elem)
-                            _time.sleep(0.2)
-                        except Exception:
-                            pass
-                        shot_b64 = avatar_elem.screenshot_as_base64 or ""
-                    except Exception as _shot_e:
-                        # 로그에 아이 이름을 남기지 않는다 (개인정보) — 순번으로만 기록
-                        write_app_log(f"Profile avatar capture failed for child #{idx + 1}: {type(_shot_e).__name__}")
+            self.children_data = manager.fetch_children(
+                self.driver,
+                status_callback=self.update_status,
+                progress_callback=_profile_progress,
+                log_callback=write_app_log,
+            )
 
-                    child_array.append([name, age, url, orig_url, shot_b64])
-                
-                
-                
-                seen_names = set()
-                img_fetch_fail_streak = 0  # 사내망 CDN 차단 시 자녀마다 수십 초씩 지연되는 것을 방지
-                for idx, item in enumerate(child_array):
-                    name, age, url, orig_url, shot_b64 = item
-                    if not name or not age:
-                        continue
-
-                    text_val = f"{name} {age}"
-
-                    if text_val not in seen_names:
-                        seen_names.add(text_val)
-                        img_b64 = None
-                        if url and img_fetch_fail_streak < 2:
-                            def profile_url_candidates(primary_url, fallback_url):
-                                candidates = []
-                                for base_url in [primary_url, fallback_url]:
-                                    if not base_url:
-                                        continue
-                                    normalized = manager.normalize_media_url(self.driver, base_url)
-                                    if normalized and normalized not in candidates:
-                                        candidates.append(normalized)
-                                    for size in [480, 360, 240]:
-                                        upgraded = normalized
-                                        for old in ['img_36x36.jpg', 'img_65x65.jpg', 'img_130x130.jpg', 'img_240x240.jpg']:
-                                            upgraded = upgraded.replace(old, f'img_{size}x{size}.jpg')
-                                        if upgraded and upgraded not in candidates:
-                                            candidates.append(upgraded)
-                                return candidates[:3]
-
-                            def fetch_img(req_url):
-                                import base64
-                                img_data, _ = manager.fetch_bytes_with_browser_session(self.driver, req_url, timeout=3)
-                                try:
-                                    from PIL import Image
-                                    import io
-                                    pil_img = Image.open(io.BytesIO(img_data))
-                                    pil_img.thumbnail((512, 512), Image.LANCZOS)
-                                    buf = io.BytesIO()
-                                    pil_img.save(buf, format='PNG')
-                                    img_data = buf.getvalue()
-                                except:
-                                    pass
-                                return base64.b64encode(img_data).decode('utf-8')
-
-                            candidates = profile_url_candidates(url, orig_url)
-                            # 1순위: 브라우저 fetch (사내망 프록시도 브라우저 네트워크는 대개 열림, 원본 화질)
-                            for candidate_url in candidates:
-                                try:
-                                    data, _status = manager._browser_fetch_media(self.driver, candidate_url, timeout=12)
-                                    if data:
-                                        import base64
-                                        img_b64 = base64.b64encode(data).decode('utf-8')
-                                        break
-                                except Exception:
-                                    continue
-                            # 2순위: 파이썬 requests 세션
-                            if not img_b64:
-                                for candidate_url in candidates:
-                                    try:
-                                        img_b64 = fetch_img(candidate_url)
-                                        if img_b64:
-                                            break
-                                    except Exception:
-                                        continue
-                            if img_b64:
-                                img_fetch_fail_streak = 0
-                            else:
-                                img_fetch_fail_streak += 1
-
-                        # 원본 다운로드 실패(사내망 차단 등) 시 브라우저 캡처본으로 대체
-                        if not img_b64 and shot_b64:
-                            img_b64 = shot_b64
-
-                        # 진단(복사용): 이 아이의 프로필 확보 결과를 한 줄로 남긴다
-                        got = "성공" if img_b64 else "실패"
-                        source = "네트워크" if (img_b64 and not shot_b64) else ("화면캡처" if img_b64 else "없음")
-                        self.update_status(f"[KN-DIAG] 프로필({name}) {got} | 방식={source} | URL={'있음' if url else '없음'} | 캡처={'있음' if shot_b64 else '없음'}")
-
-                        click_elem = click_elems[idx] if idx < len(click_elems) else None
-                        self.children_data.append({
-                            "text": text_val, 
-                            "elem": click_elem,
-                            "img_b64": img_b64
-                        })
-            except Exception as e:
-                pass
-                
             # Populate Combo Box
             write_app_log(f"Profile loading completed. children={len(getattr(self, 'children_data', []))}")
             self.run_on_ui_thread(self.populate_children_combo)
@@ -1865,32 +1532,12 @@ class KidsnoteApp(QtWidgets.QWidget):
         # 최대 페이지 로드 타임아웃(120초)까지 UI 전체가 얼어붙으므로 백그라운드로 이동
         self.child_combo.setEnabled(False)
         self.update_status(f"[{combo_text}] 계정으로 전환하는 중...")
-        threading.Thread(target=self._switch_child_worker, args=(child_info, combo_text), daemon=True).start()
+        self.run_in_background(self._switch_child_worker, child_info, combo_text)
 
     def _switch_child_worker(self, child_info, combo_text):
         try:
-            import time
             name = child_info['text'].split()[0]
-            script = """
-                var target = arguments[0];
-                var spans = document.querySelectorAll("span[role='img']");
-                for(var i=0; i<spans.length; i++){
-                    var parent = spans[i].parentElement.parentElement;
-                    if(parent && parent.innerText && parent.innerText.includes(target)) {
-                        spans[i].click();
-                        return true;
-                    }
-                }
-                return false;
-            """
-
-            # 강제로 최상단 서비스 홈으로 돌린 상태에서 클릭해야 꼬이지 않음
-            if "kidsnote.com/service" not in self.driver.current_url:
-                self.driver.get("https://www.kidsnote.com/service")
-                time.sleep(1.5)
-
-            self.driver.execute_script(script, name)
-            time.sleep(2)  # React 상태 변경 후 렌더링되도록 넉넉히 대기
+            manager.select_child(self.driver, name, status_callback=self.update_status)
 
             self.update_status(f"[{combo_text}] 계정으로 전환되었습니다. 이제 수집을 시작하세요.")
             self.run_on_ui_thread(
@@ -1958,38 +1605,38 @@ class KidsnoteApp(QtWidgets.QWidget):
     # 매번 같은 설정을 다시 고르게 하지 않기 위해 Kidsnote_Config.ini의 [Prefs]에 보관한다.
     def _save_prefs(self):
         try:
-            if not self.config.has_section('Prefs'):
-                self.config.add_section('Prefs')
-            self.config.set('Prefs', 'save_dir', self.dir_input.text().strip())
-            self.config.set('Prefs', 'period', self.period_combo.currentText())
-            # '직접 지정'으로 고른 날짜 자체도 저장한다. 예전에는 기간 이름만 저장해서,
-            # 다시 켜면 사용자가 고른 날짜가 초기 기본값(최근 1주일)으로 되돌아가
-            # 의도한 기간과 다른 범위로 조회되었다.
-            self.config.set('Prefs', 'start_date', self.start_date_edit.date().toString('yyyy.MM.dd'))
-            self.config.set('Prefs', 'end_date', self.end_date_edit.date().toString('yyyy.MM.dd'))
-            self.config.set('Prefs', 'single_folder', str(self.folder_single_radio.isChecked()))
-            self.config.set('Prefs', 'overwrite_allow', str(self.overwrite_allow_radio.isChecked()))
-            self.config.set('Prefs', 'exclude_video', str(self.chk_exclude_video.isChecked()))
             if self.both_radio.isChecked():
                 filetype = 'both'
             elif self.photo_radio.isChecked():
                 filetype = 'photo'
             else:
                 filetype = 'pdf'
-            self.config.set('Prefs', 'filetype', filetype)
-            with open(self.config_path, 'w', encoding='utf-8') as f:
-                self.config.write(f)
+
+            self.settings.set_many('Prefs', {
+                'save_dir': self.dir_input.text().strip(),
+                'period': self.period_combo.currentText(),
+                # '직접 지정'으로 고른 날짜 자체도 저장한다. 예전에는 기간 이름만 저장해서,
+                # 다시 켜면 사용자가 고른 날짜가 기본값으로 되돌아가
+                # 의도한 기간과 다른 범위로 조회되었다.
+                'start_date': self.start_date_edit.date().toString('yyyy.MM.dd'),
+                'end_date': self.end_date_edit.date().toString('yyyy.MM.dd'),
+                'single_folder': self.folder_single_radio.isChecked(),
+                'overwrite_allow': self.overwrite_allow_radio.isChecked(),
+                'exclude_video': self.chk_exclude_video.isChecked(),
+                'filetype': filetype,
+            })
+            self.settings.save()
         except Exception:
             write_app_log("Prefs save failed:\n" + traceback.format_exc())
 
     def _restore_prefs(self):
         """이전 실행에서 쓰던 저장 경로·옵션을 복원 (없으면 기본값 유지)."""
         try:
-            saved_dir = self.config.get('Prefs', 'save_dir', fallback='').strip()
+            saved_dir = self.settings.get('Prefs', 'save_dir').strip()
             if saved_dir:
                 self.dir_input.setText(saved_dir)
 
-            period = self.config.get('Prefs', 'period', fallback='')
+            period = self.settings.get('Prefs', 'period')
             if period and self.period_combo.findText(period) >= 0:
                 self.period_combo.setCurrentText(period)
 
@@ -1997,20 +1644,20 @@ class KidsnoteApp(QtWidgets.QWidget):
             # '직접 지정'은 사용자가 고른 날짜 자체가 설정이므로 따로 되살려야 한다.
             if self.period_combo.currentText().startswith('직접'):
                 for _key, _widget in (('start_date', self.start_date_edit), ('end_date', self.end_date_edit)):
-                    _saved = self.config.get('Prefs', _key, fallback='').strip()
+                    _saved = self.settings.get('Prefs', _key).strip()
                     if _saved:
                         _qd = QtCore.QDate.fromString(_saved, 'yyyy.MM.dd')
                         if _qd.isValid():
                             _widget.setDate(_qd)
 
-            if self.config.getboolean('Prefs', 'single_folder', fallback=False):
+            if self.settings.get_bool('Prefs', 'single_folder', False):
                 self.folder_single_radio.setChecked(True)
-            if not self.config.getboolean('Prefs', 'overwrite_allow', fallback=True):
+            if not self.settings.get_bool('Prefs', 'overwrite_allow', True):
                 self.overwrite_skip_radio.setChecked(True)
-            if self.config.getboolean('Prefs', 'exclude_video', fallback=False):
+            if self.settings.get_bool('Prefs', 'exclude_video', False):
                 self.chk_exclude_video.setChecked(True)
 
-            filetype = self.config.get('Prefs', 'filetype', fallback='pdf')
+            filetype = self.settings.get('Prefs', 'filetype', 'pdf')
             if filetype == 'both':
                 self.both_radio.setChecked(True)
             elif filetype == 'photo':
@@ -2077,10 +1724,57 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.end_date_edit.setEnabled(enabled)
         self.child_combo.setEnabled(enabled and bool(getattr(self, 'children_data', None)))
 
-    # 프리셋 텍스트 → 오늘로부터의 일수 (전체/직접 지정은 별도 처리)
+    # 프리셋 텍스트 → 오늘로부터의 일수 (전체/학년도/직접 지정은 별도 처리)
     _PERIOD_PRESET_DAYS = (
         ("1주일", 7), ("1개월", 30), ("3개월", 90), ("6개월", 180), ("1년", 365),
     )
+
+    @staticmethod
+    def _academic_year_start(today):
+        """이번 학년도가 시작된 날(3월 1일)을 돌려준다.
+
+        어린이집·유치원의 한 해는 3월에 시작해서 이듬해 2월에 끝난다.
+        그래서 1~2월에는 아직 '지난해 3월에 시작한 학년도' 안에 있다.
+        이때 올해 3월 1일을 쓰면 아직 오지 않은 날짜가 되어 조회 결과가 0건이 된다.
+        """
+        year = today.year() if today.month() >= 3 else today.year() - 1
+        return QtCore.QDate(year, 3, 1)
+
+    def _all_period_start(self):
+        """[전체]를 골랐을 때 날짜칸에 보여 줄 시작일.
+
+        [전체]는 실제로는 날짜로 거르지 않으므로(limit_date_str=None) 이 값은
+        화면에 보이기만 한다. 그래도 2000.01.01 처럼 아무 근거 없는 날짜를 두면
+        사용자가 '이 프로그램이 뭘 하려는 거지' 하고 헷갈린다.
+
+        아이가 태어나기 전의 알림장은 있을 수 없으므로 생년월일이 가장 정직한 시작점이다.
+        아직 로그인 전이라 아이 정보가 없으면 넉넉히 10년 전으로 둔다.
+        (키즈노트가 문을 연 해를 쓰는 방법도 있지만, 정확한 시점을 확인하지 못해
+         잘못된 연도를 코드에 박아 두지 않았다)
+        """
+        birth = self._selected_child_birth_date()
+        if birth and birth.isValid():
+            return birth
+        return QtCore.QDate.currentDate().addYears(-10)
+
+    def _selected_child_birth_date(self):
+        """콤보에 보이는 '최유찬 21.3.15. (5년 5개월)' 에서 생년월일을 읽는다.
+
+        두 자리 연도는 2000년대로 본다. 어린이집에 다니는 아이라 1900년대일 수 없다.
+        읽지 못하면 None을 돌려주고, 부르는 쪽이 대체값을 쓴다.
+        """
+        try:
+            text = self.child_combo.currentText()
+        except Exception:
+            return None
+        match = re.search(r'(\d{2,4})\.\s*(\d{1,2})\.\s*(\d{1,2})', text or '')
+        if not match:
+            return None
+        year, month, day = (int(g) for g in match.groups())
+        if year < 100:
+            year += 2000
+        date = QtCore.QDate(year, month, day)
+        return date if date.isValid() else None
 
     def on_period_changed(self):
         """조회 기간 콤보를 바꾸면 날짜칸에 해당 기간을 채워 넣는다.
@@ -2098,7 +1792,10 @@ class KidsnoteApp(QtWidgets.QWidget):
         try:
             self.end_date_edit.setDate(today)
             if text.startswith("전체"):
-                self.start_date_edit.setDate(QtCore.QDate(2000, 1, 1))
+                self.start_date_edit.setDate(self._all_period_start())
+                return
+            if text.startswith("이번 학년도"):
+                self.start_date_edit.setDate(self._academic_year_start(today))
                 return
             for keyword, preset_days in self._PERIOD_PRESET_DAYS:
                 if keyword in text:
@@ -2795,6 +2492,9 @@ class KidsnoteApp(QtWidgets.QWidget):
                 finally:
                     self.driver = None
 
+        # 여기만 맨 스레드를 쓴다. 종료 중이라 Qt 이벤트 루프가 내려가는 중일 수 있고,
+        # driver.quit()이 응답하지 않아도 5초만 기다리고 넘어가야 하기 때문이다.
+        # (그 밖의 백그라운드 작업은 BackgroundTask 를 쓴다)
         import threading
         t = threading.Thread(target=quit_driver, daemon=True)
         t.start()
@@ -2842,6 +2542,17 @@ class KidsnoteApp(QtWidgets.QWidget):
             try:
                 if worker and worker.isRunning():
                     worker.wait(2000)
+            except Exception:
+                pass
+
+        # 로그인·아이전환·업데이트확인도 기다린다. 예전에는 daemon 스레드라 그냥
+        # 버려졌는데, 브라우저에 명령을 보내던 중이었다면 msedgedriver 프로세스가
+        # 남아 PyInstaller 임시폴더 삭제 실패 경고를 냈다.
+        # 위에서 드라이버를 이미 닫았으므로 대기 중이던 것들은 곧 예외로 깨어난다.
+        for task in getattr(self, '_background_tasks', []):
+            try:
+                if task.isRunning():
+                    task.wait(2000)
             except Exception:
                 pass
         event.accept()

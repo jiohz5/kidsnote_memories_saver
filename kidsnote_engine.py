@@ -137,7 +137,7 @@ def _is_on_service_home(driver):
         current = (driver.current_url or "").split('?')[0].split('#')[0].rstrip('/')
         if not current.endswith('kidsnote.com/service'):
             return False
-        return bool(driver.find_elements(By.CSS_SELECTOR, "span[role='img']"))
+        return bool(driver.find_elements(By.CSS_SELECTOR, ANY_AVATAR_CSS))
     except Exception:
         return False
 
@@ -197,6 +197,20 @@ CARD_BODY_CLASS = "css-12g7lcb"                      # 본문 폴백
 MEMORY_MENU_CLASS = "e1q0zrbj0"                      # 사이드바 '추억보기'
 MEMORY_MENU_LINK_CLASS = "e1efjxmz8"                 # 드롭다운 '추억보기'
 ALBUM_BODY_CLASS = "css-1469k6q"                     # 앨범 상세 본문 영역
+
+# 여러 곳에서 쓰는 것들. 키즈노트가 화면을 바꾸면 여기부터 확인한다.
+# (예전에는 같은 XPath가 세 군데에 흩어져 있어, 한 곳만 고치고 넘어가기 쉬웠다)
+VIEW_ALL_XPATH = "//*[contains(text(),'전체보기')]"                    # 목록 '전체보기' 버튼
+NEXT_PAGE_XPATH = "//button[.//span[starts-with(text(), '다음')]]"     # 다음 페이지 버튼
+SIDEBAR_MENU_XPATH = "//*[@data-testid='center-sidebar-menu-select']"  # 사이드바 메뉴
+ACTIVE_AVATAR_XPATH = "//*[@size='65' and @role='img']"                # 선택된 아이의 큰 아바타
+ANY_AVATAR_CSS = "span[role='img']"                                    # 아바타 아무거나(화면 준비 확인용)
+CHILD_AVATAR_CSS = "span[role='img'][size='36']"                       # 아이 목록의 작은 아바타(선택용)
+ACTIVE_AVATAR_CSS = "span[role='img'][size='65']"                      # 선택된 아이의 큰 아바타
+
+# 사이드바의 '추억보기'. 접힌 화면에서는 아래쪽(드롭다운) 것을 눌러야 한다.
+MEMORY_MENU_XPATH = "//*[contains(@class,'%s') and contains(.,'추억보기')]" % MEMORY_MENU_CLASS
+MEMORY_MENU_LINK_XPATH = "//*[contains(@class,'%s') and contains(.,'추억보기')]" % MEMORY_MENU_LINK_CLASS
 
 
 def post_card_xpath():
@@ -646,7 +660,7 @@ def get_profile_image_b64(driver, url, log=None):
 
     # ③ 활성 아바타 요소 캡처 (네트워크 불필요)
     try:
-        avatar = driver.find_element(By.CSS_SELECTOR, "span[role='img'][size='65']")
+        avatar = driver.find_element(By.CSS_SELECTOR, ACTIVE_AVATAR_CSS)
         try:
             driver.execute_script("arguments[0].scrollIntoView({block:'center'});", avatar)
         except Exception:
@@ -827,7 +841,8 @@ def save_debug_snapshot(driver, step_name, log_func=print, mem=None):
         log_func(f"[DEBUG LOG] 스냅샷 저장 실패: {e}")
 
 
-def _scrape_list_pages(driver, item_type, memories, log, item_found_callback=None, check_stop_callback=None, limit_date_str=None, child_name=None, result_info=None, end_date_str=None):
+def _scrape_list_pages(driver, item_type, memories, log,
+                       request=None, callbacks=None, result_info=None):
     """
     Helper to scrape all pages of a list (Report or Album).
     Yields or callbacks items as they are found.
@@ -836,6 +851,14 @@ def _scrape_list_pages(driver, item_type, memories, log, item_found_callback=Non
     result_info(dict)에 조회 결과 진단 정보를 기록해 GUI가
     '기간 내 항목 없음'과 '네트워크 실패'를 구분해 안내할 수 있게 한다.
     """
+    request = request or ScrapeRequest()
+    callbacks = callbacks or ScrapeCallbacks()
+    item_found_callback = callbacks.item_found
+    check_stop_callback = callbacks.check_stop
+    limit_date_str = request.start_date
+    end_date_str = request.end_date
+    child_name = request.child_name
+
     info = result_info if isinstance(result_info, dict) else {}
     page_count = 1
     log(f"DEBUG: _scrape_list_pages 시작. 대상: {item_type}, 현재 URL: {driver.current_url}")
@@ -959,7 +982,7 @@ def _scrape_list_pages(driver, item_type, memories, log, item_found_callback=Non
                     try:
                         date_elem = post.find_element(By.CLASS_NAME, CARD_DATE_CLASS).find_element(By.TAG_NAME, "span")
                         raw_date = date_elem.text.strip()
-                    except:
+                    except Exception:
                         # 클래스가 바뀐 경우: 카드 텍스트에서 날짜 형태를 직접 찾는다
                         raw_date = _first_date_like_line(post) or "날짜 알 수 없음"
                 date = raw_date
@@ -987,7 +1010,7 @@ def _scrape_list_pages(driver, item_type, memories, log, item_found_callback=Non
                     try:
                         title_elem = post.find_element(By.CLASS_NAME, CARD_BODY_CLASS)
                         title = title_elem.text.strip()[:35]
-                    except:
+                    except Exception:
                         # 클래스가 바뀐 경우: 카드 텍스트에서 날짜/작성자가 아닌 가장 긴 줄을 본문으로 본다
                         title = _longest_content_line(post) or "제목 알 수 없음"
                 
@@ -995,7 +1018,7 @@ def _scrape_list_pages(driver, item_type, memories, log, item_found_callback=Non
                 try:
                     link_elem = post.find_element(By.TAG_NAME, "a")
                     url = link_elem.get_attribute("href")
-                except:
+                except Exception:
                     pass
 
                 if end_date_str and date and date != "날짜 알 수 없음" and date > end_date_str:
@@ -1056,7 +1079,7 @@ def _scrape_list_pages(driver, item_type, memories, log, item_found_callback=Non
         try:
             log(f"DEBUG: '다음' 버튼 찾는 중...")
             # '다음' 텍스트를 정확하게 포함하는 span을 가진 button만 찾음 (이전 버튼 제외)
-            next_buttons = driver.find_elements(By.XPATH, "//button[.//span[starts-with(text(), '다음')]]")
+            next_buttons = driver.find_elements(By.XPATH, NEXT_PAGE_XPATH)
             log(f"DEBUG: '다음' 버튼 요소 {len(next_buttons)}개 발견.")
             
             found_clickable_next = False
@@ -1078,7 +1101,7 @@ def _scrape_list_pages(driver, item_type, memories, log, item_found_callback=Non
             if post_items:
                 try:
                     WebDriverWait(driver, 5).until(EC.staleness_of(post_items[0]))
-                except:
+                except Exception:
                     time.sleep(1) # Fallback
         except Exception as e:
             log(f"페이지 이동 중 오류: {e}")
@@ -1090,14 +1113,27 @@ def navigate_to_memory_view(driver, item_type_label, log_func, target_child=None
     홈 화면에서부터 선택한 아이로 전환한 후 '추억보기' 메뉴를 통해 전체보기 화면으로 진입합니다.
     URL이 누락된 항목을 수집하거나 탐색할 때 SPA의 뷰 버퍼를 재동기화하는 강력한 방법입니다.
     """
-    try:
-        # 이미 /service 홈에 떠 있으면(반복 조회 등) SPA 전체 리로드를 생략해 시간 절약
-        if not _is_on_service_home(driver):
-            driver.get("https://www.kidsnote.com/service")
-        # 프로필 아바타가 렌더링되는 즉시 진행 (고정 2초 대기 제거)
-        wait_css(driver, "span[role='img']", timeout=10)
+    # 목록에 들어가기까지 어느 단계에서 시간이 가는지 남긴다.
+    # '이미 화면에 다 떠 있는데도 한참 기다린다'는 체감을 확인하려면
+    # 추측이 아니라 단계별 실제 소요를 봐야 한다. (진단정보 복사에 함께 담긴다)
+    _t0 = time.time()
 
+    def _mark(step):
+        log_func("[KN-DIAG] 소요 %s: %s %.1f초" % (item_type_label, step, time.time() - _t0))
+
+    try:
+        # 홈으로 가는 것은 아이를 바꿔야 할 때뿐이다. 아이 아바타가 거기에만 있기 때문이다.
+        # 바꿀 아이가 없으면 곧바로 목록 주소로 간다. 예전에는 이때도 홈을 한 번 불러왔는데,
+        # 그 화면은 바로 다음 줄의 목록 이동으로 버려져서 시간만 쓰는 일이었다.
+        # (측정: 홈 재로드 0.3초 + 아바타 렌더링 0.8초)
         if target_child:
+            if not _is_on_service_home(driver):
+                driver.get("https://www.kidsnote.com/service")
+                _mark("홈 재로드")
+            # 프로필 아바타가 렌더링되는 즉시 진행 (고정 2초 대기 제거)
+            wait_css(driver, ANY_AVATAR_CSS, timeout=10)
+            _mark("아바타 렌더링까지")
+
             try:
                 log_func(f"아이 전환 확인 중 (이름: {target_child})...")
                 script = """
@@ -1117,92 +1153,41 @@ def navigate_to_memory_view(driver, item_type_label, log_func, target_child=None
                     log_func(f"[KN-DIAG] 아이 매칭 실패(이름: {target_child}) → 재진입 시도")
                 time.sleep(0.5)
                 driver.get("https://www.kidsnote.com/service")
-                wait_css(driver, "span[role='img']", timeout=10)
+                wait_css(driver, ANY_AVATAR_CSS, timeout=10)
             except Exception as e:
                 log_func(f"아이 전환 중 예외 (무시): {e}")
 
-        # 참고: 예전에는 '전체보기 버튼이 보이면 메뉴 클릭 생략' 지름길이 있었으나 제거했다.
-        # SPA는 URL이 /service 그대로라 이전 아이의 잔상 화면을 '이미 추억보기'로 오판할 수 있어,
-        # 아이 매칭 후에는 항상 추억보기 메뉴를 눌러 해당 아이의 목록으로 확실히 진입한다.
-        clicked = False
+        # 추억보기 메뉴는 더 이상 누르지 않는다.
+        # 바로 아래에서 목록 주소로 페이지를 새로 여는데, 메뉴 클릭이 바꾸는 것은
+        # 화면 상태뿐이라 그 이동으로 통째로 버려진다. 즉 눌러 봐야 시간만 쓴다.
+        # (측정: 메뉴를 찾고 누르는 데 0.2~1.0초)
 
-        # 추억보기 1순위 클릭
-        if not clicked:
-            try:
-                mem_btn = WebDriverWait(driver, 20).until(
-                    EC.element_to_be_clickable((By.XPATH, "//*[contains(@class,'" + MEMORY_MENU_CLASS + "') and contains(.,'추억보기')]"))
-                )
-                driver.execute_script("arguments[0].click();", mem_btn)
-                time.sleep(0.5)
-                clicked = True
-            except:
-                pass
-            
-        # 추억보기 2순위 드롭다운 클릭
-        if not clicked:
-            try:
-                toggle = driver.find_element(By.XPATH, "//*[@data-testid='center-sidebar-menu-select']")
-                driver.execute_script("arguments[0].click();", toggle)
-                time.sleep(0.5)
-                mem_link = WebDriverWait(driver, 15).until(
-                    EC.element_to_be_clickable((By.XPATH, "//*[contains(@class,'" + MEMORY_MENU_LINK_CLASS + "') and contains(.,'추억보기')]"))
-                )
-                driver.execute_script("arguments[0].click();", mem_link)
-                time.sleep(0.5)
-            except Exception as e:
-                log_func(f"추억보기 진입 모두 실패: {e}")
-
-        # 전체보기 클릭
+        # 목록 주소로 곧바로 들어간다.
+        #
+        # 예전에는 화면에서 '전체보기' 버튼을 찾아 눌렀다. 그런데 재 보니 그 클릭은
+        # 주소를 바꾸지 못했고, 뒤따르는 주소 확인이 5초를 다 쓰고 실패한 다음
+        # 결국 '주소로 직접 이동'이 매번 실제 진입을 해내고 있었다.
+        # (측정: 클릭 직후 0.3초 → 목록까지 6.4초. 그 6.1초 중 5초가 헛기다림이었다)
+        #
+        # 주소로 가는 편이 빠르기만 한 게 아니라 더 안전하다. 버튼을 고르는 방식은
+        # 앨범인데 버튼이 하나뿐이면 알림장 버튼을 눌러, 알림장 글이 앨범으로
+        # 수집되는 조용한 오염이 생길 수 있었다. 주소에는 그런 모호함이 없다.
         try:
-            # /service를 새로 로드한 직후라 이전 화면 잔상이 없으므로 최소 안정화만 두고
-            # 실제 대기는 아래 WebDriverWait(전체보기 버튼 감지)가 담당 → 뜨는 즉시 진행
-            time.sleep(0.3)
-
-            if item_type_label == "앨범":
-                try:
-                    target_btn = WebDriverWait(driver, 10).until(
-                        lambda d: (lambda btns: btns[1] if len(btns) >= 2 else None)([b for b in d.find_elements(By.XPATH, "//*[contains(text(),'전체보기')]") if b.is_displayed()])
-                    )
-                except TimeoutException:
-                    btns = [b for b in driver.find_elements(By.XPATH, "//*[contains(text(),'전체보기')]") if b.is_displayed()]
-                    target_btn = btns[0] if btns else None
-            else:
-                target_btn = WebDriverWait(driver, 10).until(
-                    lambda d: (lambda btns: btns[0] if btns else None)([b for b in d.find_elements(By.XPATH, "//*[contains(text(),'전체보기')]") if b.is_displayed()])
-                )
-
-            if target_btn:
-                driver.execute_script("arguments[0].click();", target_btn)
-            else:
-                # 버튼이 안 보인다고 바로 포기하지 않는다. 해당 목록은 고유 주소가 있으므로
-                # 주소로 직접 이동해서라도 진입한다. (앨범 진입이 종종 실패하던 원인)
-                log_func(f"{item_type_label} 전체보기 버튼이 보이지 않아 주소로 직접 이동합니다.")
-                driver.get(SECTION_URLS[item_type_label])
+            driver.get(SECTION_URLS[item_type_label])
+            _mark("목록 주소로 이동")
         except Exception as e:
-            log_func(f"전체보기 버튼 클릭 실패: {e} → 주소로 직접 이동합니다.")
-            try:
-                driver.get(SECTION_URLS[item_type_label])
-            except Exception:
-                return False
+            log_func(f"{item_type_label} 목록으로 이동하지 못했습니다: {e}")
+            return False
 
-        # 엉뚱한 목록으로 갔는지 확인한다.
-        # 앨범인데 '전체보기' 버튼이 하나뿐이면 알림장 버튼을 누르게 되어,
-        # 알림장 글이 앨범으로 수집되는 조용한 오염이 생길 수 있다.
-        try:
-            expected = SECTION_URLS[item_type_label]
-            marker = expected.rsplit("/", 1)[-1]          # 'report' 또는 'album'
-            WebDriverWait(driver, 5).until(lambda d: marker in (d.current_url or ""))
-        except Exception:
-            log_func(f"{item_type_label} 화면이 아닌 곳으로 이동한 것 같아 주소로 다시 진입합니다. (현재: {driver.current_url})")
-            try:
-                driver.get(SECTION_URLS[item_type_label])
-            except Exception:
-                return False
+        # 로그인 만료 등으로 엉뚱한 곳에 떨어졌는지만 본다. 정상이면 즉시 통과한다.
+        marker = SECTION_URLS[item_type_label].rsplit("/", 1)[-1]   # 'report' 또는 'album'
+        if marker not in (driver.current_url or ""):
+            log_func(f"[KN-DIAG] {item_type_label} 목록이 아닌 곳으로 갔습니다: {driver.current_url}")
 
         # 목록 항목 대기 (에러 화면이 뜨면 타임아웃을 기다리지 않고 즉시 빠져나옴)
-        time.sleep(0.3)  # 아래 대기가 게시물 감지 즉시 통과하므로 고정 안정화는 최소화
         outcome = _wait_for_list_or_app_error(driver, timeout=30)
         if outcome == 'items':
+            _mark("목록이 뜰 때까지(합계)")
             return True
         if outcome == 'error':
             log_func(f"{item_type_label} 목록 대신 키즈노트 자체 오류 화면이 감지되었습니다.")
@@ -1215,13 +1200,88 @@ def navigate_to_memory_view(driver, item_type_label, log_func, target_child=None
         
 
 
-def fetch_memory_list(driver, status_callback=None, item_found_callback=None, check_stop_callback=None, scrape_reports=True, scrape_albums=True, profile_found_callback=None, limit_date_str=None, child_name=None, result_info=None, end_date_str=None):
+class ScrapeRequest(object):
+    """무엇을 조회할지. 조회 한 번에 대한 요청서다.
+
+    인자 열한 개를 늘어놓던 것을 묶었다. 그중 다섯은 '무엇을 조회할지'(여기),
+    넷은 '진행 상황을 어디로 알릴지'(ScrapeCallbacks), 하나는 결과 진단용이라
+    성격이 서로 달랐다.
+
+    start_date / end_date 는 'yyyy.mm.dd' 문자열이다. 둘 다 None 이면 기간을
+    가리지 않고 전부 가져온다 (화면의 [전체]).
     """
-    Fetches the list of memories by navigating directly to /service/report and /service/album.
-    If child_name is provided, navigate to /service first and click the child with that name.
-    limit_date_str~end_date_str (yyyy.mm.dd) 범위의 게시물만 수집한다.
-    result_info(dict)를 넘기면 조회 결과 진단 정보(list_loaded/items_seen/filtered_out/timeout/nav_failed)를 기록한다.
+
+    __slots__ = ('reports', 'albums', 'start_date', 'end_date', 'child_name')
+
+    def __init__(self, reports=True, albums=True,
+                 start_date=None, end_date=None, child_name=None):
+        self.reports = reports          # 알림장을 가져올까
+        self.albums = albums            # 앨범을 가져올까
+        self.start_date = start_date    # 이 날짜보다 오래된 글은 건너뛴다
+        self.end_date = end_date        # 이 날짜보다 최근 글은 건너뛴다
+        self.child_name = child_name    # 이 아이로 전환한 뒤 조회한다
+
+    @property
+    def labels(self):
+        """조회할 대상 이름들. 화면 표기와 같은 말을 쓴다."""
+        names = []
+        if self.reports:
+            names.append("알림장")
+        if self.albums:
+            names.append("앨범")
+        return names
+
+    def __repr__(self):
+        return "ScrapeRequest(reports=%r, albums=%r, %s~%s)" % (
+            self.reports, self.albums, self.start_date, self.end_date)
+
+
+class ScrapeCallbacks(object):
+    """조회하면서 알려 줄 곳들. 모두 없어도 된다(그러면 조용히 진행한다).
+
+    엔진이 GUI를 직접 만지지 않게 하려고 함수로 받는다. 무엇을 하는 함수인지는
+    부르는 쪽이 정한다. GUI는 여기에 Qt 시그널을 꽂아 화면을 갱신한다.
     """
+
+    __slots__ = ('status', 'item_found', 'profile_found', 'check_stop')
+
+    def __init__(self, status=None, item_found=None,
+                 profile_found=None, check_stop=None):
+        self.status = status                # 진행 문구 한 줄
+        self.item_found = item_found        # 게시물 하나를 찾을 때마다
+        self.profile_found = profile_found  # 아이 프로필을 확보했을 때
+        self.check_stop = check_stop        # 사용자가 중지를 눌렀는지 물어볼 함수
+
+    def stopped(self):
+        return bool(self.check_stop and self.check_stop())
+
+
+def fetch_memory_list(driver, request=None, callbacks=None, result_info=None):
+    """알림장과 앨범 목록을 훑어 게시물 정보를 모아 온다.
+
+    request(ScrapeRequest)가 무엇을 가져올지, callbacks(ScrapeCallbacks)가
+    진행 상황을 어디로 알릴지 정한다. 생략하면 기본값으로 전부 조회한다.
+
+    아이 이름이 주어지면 먼저 그 아이로 전환한 뒤 조회한다.
+
+    result_info(dict)를 넘기면 조회 결과 진단 정보를 기록한다
+    (list_loaded / items_seen / filtered_out / timeout / nav_failed).
+    '기간 안에 글이 없었다'와 '조회가 실패했다'는 둘 다 0건으로 끝나지만
+    사용자에게는 전혀 다른 이야기라, GUI가 이 값을 보고 구분해서 안내한다.
+    """
+    request = request or ScrapeRequest()
+    callbacks = callbacks or ScrapeCallbacks()
+
+    status_callback = callbacks.status
+    item_found_callback = callbacks.item_found
+    check_stop_callback = callbacks.check_stop
+    profile_found_callback = callbacks.profile_found
+    scrape_reports = request.reports
+    scrape_albums = request.albums
+    limit_date_str = request.start_date
+    end_date_str = request.end_date
+    child_name = request.child_name
+
     def log(msg):
         print(msg) # 터미널에도 출력
         if status_callback and 'DEBUG' not in msg:
@@ -1235,7 +1295,7 @@ def fetch_memory_list(driver, status_callback=None, item_found_callback=None, ch
     if not _is_on_service_home(driver):
         driver.get("https://www.kidsnote.com/service")
     # React Hydration 완료(아바타 렌더링)를 감지하는 즉시 진행 (고정 1초 대기 제거)
-    wait_css(driver, "span[role='img']", timeout=10)
+    wait_css(driver, ANY_AVATAR_CSS, timeout=10)
 
     if child_name is not None:
         try:
@@ -1262,7 +1322,7 @@ def fetch_memory_list(driver, status_callback=None, item_found_callback=None, ch
                 time.sleep(0.5) # 클릭 후 정보 변경 대기
                 # 아이 전환 직후에는 라우팅 꼬임을 방지하기 위해 홈으로 리프레시
                 driver.get("https://www.kidsnote.com/service")
-                wait_css(driver, "span[role='img']", timeout=10)
+                wait_css(driver, ANY_AVATAR_CSS, timeout=10)
         except Exception as e:
             log(f"아이 전환 중 오류 (무시됨): {e}")
 
@@ -1336,7 +1396,9 @@ def fetch_memory_list(driver, status_callback=None, item_found_callback=None, ch
             if navigate_to_memory_view(driver, label, log, target_child=None):
                 nav_ok = True
                 log(f"{label} 전수 조사를 시작합니다...")
-                _scrape_list_pages(driver, label, memories, log, item_found_callback, check_stop_callback, limit_date_str, child_name, result_info=attempt_info, end_date_str=end_date_str)
+                _scrape_list_pages(driver, label, memories, log,
+                                   request=request, callbacks=callbacks,
+                                   result_info=attempt_info)
             collected = len(memories) - before
 
             app_error = collected == 0 and (attempt_info.get('app_error') or _detect_kidsnote_app_error(driver))
@@ -1364,7 +1426,7 @@ def fetch_memory_list(driver, status_callback=None, item_found_callback=None, ch
                 else:
                     log(f"{label} 조회가 비정상 종료되어 화면을 새로 고친 뒤 한 번 더 시도합니다...")
                 driver.get("https://www.kidsnote.com/service")
-                wait_css(driver, "span[role='img']", timeout=10)
+                wait_css(driver, ANY_AVATAR_CSS, timeout=10)
                 continue
 
             # 마지막 시도의 진단 정보만 최종 info에 반영 (재시도 성공 시 첫 실패 흔적은 제거)
@@ -1421,7 +1483,7 @@ def download_as_pdf(driver, post_info, target_path, status_callback=None, check_
             WebDriverWait(driver, 10).until(
                 lambda d: d.find_elements(By.CLASS_NAME, ALBUM_BODY_CLASS) or d.find_elements(By.TAG_NAME, "img")
             )
-        except:
+        except Exception:
             pass
         if _sleep_with_stop(2, check_stop_callback):  # 댓글 섹션 렌더링 추가 대기
             log("다운로드가 중지되었습니다.")
@@ -1473,7 +1535,7 @@ def download_as_pdf(driver, post_info, target_path, status_callback=None, check_
                             if _sleep_with_stop(1.5, check_stop_callback):
                                 log("다운로드가 중지되었습니다.")
                                 return False
-                    except:
+                    except Exception:
                         pass
                 if not clicked:
                     break
@@ -1560,7 +1622,7 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
             WebDriverWait(driver, 10).until(
                 lambda d: len(d.find_elements(By.TAG_NAME, "img")) > 1 or d.find_elements(By.CLASS_NAME, ALBUM_BODY_CLASS)
             )
-        except:
+        except Exception:
             pass 
         if _sleep_with_stop(2.0, check_stop_callback):  # 레이지 로딩된 이미지 태그가 DOM에 붙는 시간을 충분히 기다림
             log("다운로드가 중지되었습니다.")
@@ -1903,7 +1965,7 @@ def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None,
                 try:
                     raw_date = None
                     try: raw_date = post.find_element(By.XPATH, CARD_DATE_XPATH).text.strip()
-                    except: raw_date = post.find_element(By.CLASS_NAME, CARD_DATE_CLASS).find_element(By.TAG_NAME, "span").text.strip()
+                    except Exception: raw_date = post.find_element(By.CLASS_NAME, CARD_DATE_CLASS).find_element(By.TAG_NAME, "span").text.strip()
                     
                     d = raw_date
                     if d and d != "날짜 알 수 없음":
@@ -1923,10 +1985,10 @@ def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None,
                     try:
                         full_text = post.find_element(By.XPATH, CARD_BODY_XPATH).text.strip()
                         t = full_text[:35].replace('\n', ' ') + "..." if len(full_text) > 35 else full_text.replace('\n', ' ')
-                    except:
+                    except Exception:
                         try:
                             t = post.find_element(By.CLASS_NAME, CARD_BODY_CLASS).text.strip()[:35]
-                        except:
+                        except Exception:
                             t = ""
 
                     # 1순위: URL 매칭 (가장 정확함)
@@ -1934,7 +1996,7 @@ def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None,
                         post_url = post.find_element(By.TAG_NAME, "a").get_attribute("href")
                         if mem.get('url') and post_url == mem['url']:
                             return post
-                    except:
+                    except Exception:
                         pass
                         
                     # 2순위: 텍스트 기반 매칭 (URL이 없는 경우 대비)
@@ -1957,7 +2019,7 @@ def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None,
                     if _stop_requested(check_stop_callback):
                         log("다운로드가 중지되었습니다.")
                         return False
-                    next_buttons = driver.find_elements(By.XPATH, "//button[.//span[starts-with(text(), '다음')]]")
+                    next_buttons = driver.find_elements(By.XPATH, NEXT_PAGE_XPATH)
                     found_next = False
                     for btn in next_buttons:
                         is_disabled = btn.get_attribute("disabled") or "disabled" in (btn.get_attribute("class") or "").lower()
@@ -1971,7 +2033,7 @@ def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None,
                         if found_post: break
                     else:
                         break
-            except:
+            except Exception:
                 pass
 
         # 3. If STILL not found — fallback: go through '추억보기' to reset memory view mode
@@ -1997,8 +2059,8 @@ def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None,
                     WebDriverWait(driver, 10).until(
                         EC.presence_of_element_located((By.XPATH, post_card_xpath()))
                     )
-                except: pass
-                next_buttons = driver.find_elements(By.XPATH, "//button[.//span[starts-with(text(), '다음')]]")
+                except Exception: pass
+                next_buttons = driver.find_elements(By.XPATH, NEXT_PAGE_XPATH)
                 found_next = False
                 for btn in next_buttons:
                     is_disabled = btn.get_attribute("disabled") or "disabled" in (btn.get_attribute("class") or "").lower()
@@ -2016,7 +2078,7 @@ def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None,
                     EC.presence_of_element_located((By.XPATH, post_card_xpath()))
                 )
                 time.sleep(1)
-            except:
+            except Exception:
                 log("목록 항목을 로드하는 데 시간이 초과되었습니다.")
 
             found_post = _find_target()
@@ -2049,3 +2111,313 @@ def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None,
         log(f"상세 페이지 이동 중 오류: {e}")
         save_debug_snapshot(driver, f"Error_Navigating_{mem['type']}", status_callback, mem=mem)
         return False
+
+
+# ---------------------------------------------------------------------------
+# 로그인과 아이 목록
+#
+# 원래 GUI(_init_driver) 안에서 직접 하던 일이다. 화면을 그리는 코드와 키즈노트
+# 마크업을 읽는 코드가 한 함수에 섞여 있으면, 사이트가 바뀔 때 고칠 곳을 두 파일에서
+# 찾아야 한다. 이 프로그램에서 가장 자주 일어나는 유지보수가 그것이라 웹을 읽는 일은
+# 전부 이쪽으로 모은다.
+# ---------------------------------------------------------------------------
+
+# 작은 아바타 옆에서 이름과 나이를 읽어 온다.
+_CHILD_NAMES_JS = """
+var results = [];
+var spans = document.querySelectorAll("span[role='img'][size='36']");
+for (var i = 0; i < spans.length; i++) {
+  var container = spans[i].parentElement.parentElement;
+  var pTags = container.querySelectorAll("p");
+  if (pTags.length >= 2) {
+    results.push([pTags[0].textContent.trim(), pTags[1].textContent.trim()]);
+  }
+}
+return results;
+"""
+
+# 활성 아바타에서 얼굴 사진 주소를 뽑는다.
+# img 태그가 있으면 그쪽이 정확하고, 없으면 배경 이미지 CSS에서 긁는다.
+_ACTIVE_AVATAR_URL_JS = """
+var s = document.querySelector("span[role='img'][size='65']");
+if (!s) { return ""; }
+var img = s.querySelector("img");
+if (img && (img.currentSrc || img.src)) { return img.currentSrc || img.src; }
+var bg = window.getComputedStyle(s).backgroundImage || "";
+var match = bg.match(/url\(["']?([^"')]+)["']?\)/);
+return match ? match[1] : "";
+"""
+
+# 목록에 쓰이는 작은 썸네일 주소. 큰 것으로 바꿔야 화면에서 뭉개지지 않는다.
+_THUMB_SIZES = ('img_36x36.jpg', 'img_65x65.jpg', 'img_130x130.jpg', 'img_240x240.jpg')
+
+
+def login(driver, username, password, status_callback=None,
+          field_timeout=90, verify_timeout=20):
+    """키즈노트에 로그인하고, 실제로 성공했는지 확인해서 알려준다.
+
+    성공 여부는 주소로 판단한다. 로그인 화면(/login)을 벗어났으면 성공이다.
+    예전에는 아이디와 비밀번호를 넣기만 하고 무조건 '로그인 성공'이라고 표시해서,
+    비밀번호가 틀려도 한참 진행하다 엉뚱한 화면에서 멈추는 바람에 원인을 알 수 없었다.
+
+    돌려주는 값은 (결과, 사유) 두 개다.
+        'ok'      로그인 성공
+        'failed'  아이디나 비밀번호가 틀린 것으로 보임 (로그인 화면에 머물러 있음)
+        'error'   로그인 화면 자체를 못 띄움 (네트워크 지연 등). 사유가 함께 온다.
+    """
+    def log(msg):
+        if status_callback:
+            status_callback(msg)
+
+    try:
+        driver.set_page_load_timeout(120)
+        driver.get("https://www.kidsnote.com/login")
+        user_field = WebDriverWait(driver, field_timeout).until(
+            EC.presence_of_element_located((By.NAME, "username")))
+    except Exception as e:
+        return 'error', str(e)
+
+    try:
+        from selenium.webdriver.common.keys import Keys
+        pass_field = driver.find_element(By.NAME, "password")
+        user_field.send_keys(username)
+        pass_field.send_keys(password)
+        pass_field.send_keys(Keys.RETURN)
+    except Exception as e:
+        return 'error', str(e)
+
+    log("로그인 확인 중...")
+    try:
+        WebDriverWait(driver, verify_timeout).until(
+            lambda d: "/login" not in d.current_url)
+    except Exception:
+        return 'failed', ''
+    return 'ok', ''
+
+
+def upgrade_thumbnail_url(url, size=240):
+    """작은 썸네일 주소를 더 큰 해상도 주소로 바꾼다. 해당 없으면 그대로 둔다."""
+    if not url:
+        return url
+    for thumb in _THUMB_SIZES:
+        url = url.replace(thumb, 'img_%dx%d.jpg' % (size, size))
+    return url
+
+
+def _profile_url_candidates(driver, primary_url, fallback_url):
+    """얼굴 사진을 받아 볼 주소 후보를 큰 해상도부터 만든다.
+
+    같은 사진이라도 해상도별로 주소가 따로 있는데 어느 것이 살아 있는지는 받아 봐야 안다.
+    다만 너무 많이 시도하면 사내망처럼 막힌 환경에서 아이마다 수십 초씩 잡아먹으므로
+    셋에서 끊는다.
+    """
+    candidates = []
+    for base_url in (primary_url, fallback_url):
+        if not base_url:
+            continue
+        normalized = normalize_media_url(driver, base_url)
+        if normalized and normalized not in candidates:
+            candidates.append(normalized)
+        for size in (480, 360, 240):
+            upgraded = upgrade_thumbnail_url(normalized, size)
+            if upgraded and upgraded not in candidates:
+                candidates.append(upgraded)
+    return candidates[:3]
+
+
+def _fetch_profile_bytes(driver, candidates, timeout=12):
+    """후보 주소를 순서대로 시도해 얼굴 사진을 base64로 받아 온다.
+
+    브라우저 fetch를 먼저 쓴다. 사내망 프록시도 브라우저 네트워크는 대개 열려 있고
+    원본 화질을 그대로 받을 수 있기 때문이다. 안 되면 파이썬 requests 세션으로 넘어간다.
+    """
+    for url in candidates:
+        try:
+            data, _status = _browser_fetch_media(driver, url, timeout=timeout)
+            if data:
+                return base64.b64encode(data).decode('utf-8')
+        except Exception:
+            continue
+
+    for url in candidates:
+        try:
+            data, _ct = fetch_bytes_with_browser_session(driver, url, timeout=3)
+            if data:
+                return base64.b64encode(data).decode('utf-8')
+        except Exception:
+            continue
+    return ""
+
+
+def fetch_children(driver, status_callback=None, progress_callback=None,
+                   log_callback=None, max_image_failures=2):
+    """로그인한 계정의 아이 목록을 얼굴 사진과 함께 읽어 온다.
+
+    얼굴 사진은 레이지 로딩이라 그냥은 주소를 알 수 없다. 아이를 클릭해서 큰 아바타가
+    활성화되어야 비로소 CSS에 주소가 들어간다. 그래서 아이마다 클릭 → 주소 추출 →
+    내려받기 순서로 진행한다.
+
+    내려받기가 연달아 실패하면(max_image_failures) 이후로는 시도하지 않는다.
+    사내망에서 CDN이 막혀 있으면 아이마다 수십 초씩 기다리게 되는데, 얼굴 사진이 없어도
+    프로그램을 쓰는 데는 지장이 없기 때문이다. 이때도 화면에 보이는 아바타를 캡처해
+    두므로 대개 얼굴은 뜬다.
+
+    progress_callback(이름, 현재번호, 전체수) 로 진행 상황을 알린다.
+
+    돌려주는 값은 아이마다 다음을 담은 목록이다.
+        text     화면에 보일 '이름 생년월일 (나이)'
+        elem     이 아이를 고를 때 클릭할 요소
+        img_b64  얼굴 사진 (없으면 None)
+    """
+    def log(msg):
+        if status_callback:
+            status_callback(msg)
+
+    def debug(msg):
+        if log_callback:
+            log_callback(msg)
+
+    # 아이 목록은 서비스 홈에만 있다. 다른 화면에 있으면 먼저 홈으로 돌아간다.
+    if "kidsnote.com/service" not in (driver.current_url or ""):
+        driver.get("https://www.kidsnote.com/service")
+    wait_css(driver, ANY_AVATAR_CSS, timeout=10)
+
+    # 큰 아바타가 뜰 때까지 기다린다. 이게 있어야 얼굴 사진 주소를 읽을 수 있다.
+    try:
+        WebDriverWait(driver, 60).until(
+            EC.presence_of_element_located((By.XPATH, ACTIVE_AVATAR_XPATH)))
+        time.sleep(1)   # 이름과 나이 텍스트가 뒤따라 그려지는 시간
+    except Exception:
+        pass
+
+    try:
+        name_array = driver.execute_script(_CHILD_NAMES_JS) or []
+        click_elems = driver.find_elements(By.CSS_SELECTOR, CHILD_AVATAR_CSS)
+    except Exception as e:
+        debug("Child list scrape failed: %s" % type(e).__name__)
+        return []
+
+    children = []
+    seen = set()
+    failure_streak = 0
+
+    for idx, name_info in enumerate(name_array):
+        try:
+            name, age = name_info
+        except (TypeError, ValueError):
+            continue
+        if not name or not age:
+            continue
+
+        text_val = "%s %s" % (name, age)
+        if text_val in seen:
+            continue
+        seen.add(text_val)
+
+        if progress_callback:
+            progress_callback(name, idx + 1, len(name_array))
+
+        # 이 아이를 클릭해 큰 아바타를 활성화시킨다 (그래야 사진 주소가 생긴다)
+        if idx < len(click_elems):
+            try:
+                driver.execute_script("arguments[0].click();", click_elems[idx])
+                time.sleep(1.0)     # CSS에 주소가 주입되는 시간
+            except Exception:
+                pass
+
+        # 활성화된 아바타에서 사진 주소를 읽는다
+        url = orig_url = ""
+        try:
+            raw = driver.execute_script(_ACTIVE_AVATAR_URL_JS) or ""
+        except Exception:
+            raw = ""
+        if raw and raw != "none":
+            if raw.startswith(("http", "//", "/")):
+                url = normalize_media_url(driver, raw)
+            elif "url(" in raw:
+                start = raw.index("url(") + 4
+                end = raw.index(")", start)
+                url = normalize_media_url(driver, raw[start:end].strip('"').strip("'"))
+            orig_url = url
+            url = upgrade_thumbnail_url(url)
+
+        # 네트워크가 막혀도 얼굴이 뜨도록 화면에 보이는 아바타를 캡처해 둔다
+        shot_b64 = ""
+        try:
+            avatar = driver.find_element(By.CSS_SELECTOR, ACTIVE_AVATAR_CSS)
+            try:
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", avatar)
+                time.sleep(0.2)
+            except Exception:
+                pass
+            shot_b64 = avatar.screenshot_as_base64 or ""
+        except Exception as e:
+            # 로그에 아이 이름을 남기지 않는다 (개인정보) - 순번으로만 기록
+            debug("Profile avatar capture failed for child #%d: %s" % (idx + 1, type(e).__name__))
+
+        img_b64 = None
+        if url and failure_streak < max_image_failures:
+            img_b64 = _fetch_profile_bytes(
+                driver, _profile_url_candidates(driver, url, orig_url)) or None
+            failure_streak = 0 if img_b64 else failure_streak + 1
+
+        # 원본을 못 받았으면 화면 캡처본으로 대신한다
+        if not img_b64 and shot_b64:
+            img_b64 = shot_b64
+
+        # 진단(복사용): 이 아이의 프로필 확보 결과를 한 줄로 남긴다
+        source = "없음"
+        if img_b64:
+            source = "화면캡처" if img_b64 == shot_b64 else "네트워크"
+        log("[KN-DIAG] 프로필(%s) %s | 방식=%s | URL=%s | 캡처=%s" % (
+            name, "성공" if img_b64 else "실패", source,
+            "있음" if url else "없음", "있음" if shot_b64 else "없음"))
+
+        children.append({
+            "text": text_val,
+            "elem": click_elems[idx] if idx < len(click_elems) else None,
+            "img_b64": img_b64,
+        })
+
+    return children
+
+
+# 이름이 보이는 아바타를 찾아 클릭한다. 아이 전환은 React 상태 변경이라
+# 주소를 바꾸는 것으로는 되지 않고 실제로 눌러야 한다.
+_SELECT_CHILD_JS = """
+var target = arguments[0];
+var spans = document.querySelectorAll("span[role='img']");
+for (var i = 0; i < spans.length; i++) {
+  var parent = spans[i].parentElement.parentElement;
+  if (parent && parent.innerText && parent.innerText.includes(target)) {
+    spans[i].click();
+    return true;
+  }
+}
+return false;
+"""
+
+
+def select_child(driver, child_name, status_callback=None):
+    """아이 목록에서 해당 아이를 눌러 활성 계정을 바꾼다.
+
+    서비스 홈이 아닌 화면에서 누르면 상태가 꼬이므로 먼저 홈으로 되돌린다.
+    누른 뒤에는 React가 화면을 다시 그릴 시간을 준다.
+
+    찾아서 눌렀으면 True. 이름이 목록에 없으면 False.
+    """
+    def log(msg):
+        if status_callback:
+            status_callback(msg)
+
+    if "kidsnote.com/service" not in (driver.current_url or ""):
+        driver.get("https://www.kidsnote.com/service")
+        time.sleep(1.5)
+
+    clicked = bool(driver.execute_script(_SELECT_CHILD_JS, child_name))
+    if not clicked:
+        log("DEBUG: 아이 목록에서 해당 이름을 찾지 못했습니다.")
+        return False
+
+    time.sleep(2)   # React 상태 변경 후 렌더링 대기
+    return True
