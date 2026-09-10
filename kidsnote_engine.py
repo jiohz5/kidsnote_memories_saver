@@ -1109,12 +1109,22 @@ def navigate_to_memory_view(driver, item_type_label, log_func, target_child=None
     홈 화면에서부터 선택한 아이로 전환한 후 '추억보기' 메뉴를 통해 전체보기 화면으로 진입합니다.
     URL이 누락된 항목을 수집하거나 탐색할 때 SPA의 뷰 버퍼를 재동기화하는 강력한 방법입니다.
     """
+    # 목록에 들어가기까지 어느 단계에서 시간이 가는지 남긴다.
+    # '이미 화면에 다 떠 있는데도 한참 기다린다'는 체감을 확인하려면
+    # 추측이 아니라 단계별 실제 소요를 봐야 한다. (진단정보 복사에 함께 담긴다)
+    _t0 = time.time()
+
+    def _mark(step):
+        log_func("[KN-DIAG] 소요 %s: %s %.1f초" % (item_type_label, step, time.time() - _t0))
+
     try:
         # 이미 /service 홈에 떠 있으면(반복 조회 등) SPA 전체 리로드를 생략해 시간 절약
         if not _is_on_service_home(driver):
             driver.get("https://www.kidsnote.com/service")
+            _mark("홈 재로드")
         # 프로필 아바타가 렌더링되는 즉시 진행 (고정 2초 대기 제거)
         wait_css(driver, ANY_AVATAR_CSS, timeout=10)
+        _mark("아바타 렌더링까지")
 
         if target_child:
             try:
@@ -1152,7 +1162,7 @@ def navigate_to_memory_view(driver, item_type_label, log_func, target_child=None
                     EC.element_to_be_clickable((By.XPATH, "//*[contains(@class,'" + MEMORY_MENU_CLASS + "') and contains(.,'추억보기')]"))
                 )
                 driver.execute_script("arguments[0].click();", mem_btn)
-                time.sleep(0.5)
+                _mark("추억보기 클릭까지")
                 clicked = True
             except Exception:
                 pass
@@ -1162,21 +1172,16 @@ def navigate_to_memory_view(driver, item_type_label, log_func, target_child=None
             try:
                 toggle = driver.find_element(By.XPATH, SIDEBAR_MENU_XPATH)
                 driver.execute_script("arguments[0].click();", toggle)
-                time.sleep(0.5)
                 mem_link = WebDriverWait(driver, 15).until(
                     EC.element_to_be_clickable((By.XPATH, "//*[contains(@class,'" + MEMORY_MENU_LINK_CLASS + "') and contains(.,'추억보기')]"))
                 )
                 driver.execute_script("arguments[0].click();", mem_link)
-                time.sleep(0.5)
             except Exception as e:
                 log_func(f"추억보기 진입 모두 실패: {e}")
 
         # 전체보기 클릭
         try:
-            # /service를 새로 로드한 직후라 이전 화면 잔상이 없으므로 최소 안정화만 두고
-            # 실제 대기는 아래 WebDriverWait(전체보기 버튼 감지)가 담당 → 뜨는 즉시 진행
-            time.sleep(0.3)
-
+            # 실제 대기는 아래 WebDriverWait(전체보기 버튼 감지)가 담당한다 → 뜨는 즉시 진행
             if item_type_label == "앨범":
                 try:
                     target_btn = WebDriverWait(driver, 10).until(
@@ -1191,6 +1196,7 @@ def navigate_to_memory_view(driver, item_type_label, log_func, target_child=None
                 )
 
             if target_btn:
+                _mark("전체보기 버튼 찾기까지")
                 driver.execute_script("arguments[0].click();", target_btn)
             else:
                 # 버튼이 안 보인다고 바로 포기하지 않는다. 해당 목록은 고유 주소가 있으므로
@@ -1219,9 +1225,9 @@ def navigate_to_memory_view(driver, item_type_label, log_func, target_child=None
                 return False
 
         # 목록 항목 대기 (에러 화면이 뜨면 타임아웃을 기다리지 않고 즉시 빠져나옴)
-        time.sleep(0.3)  # 아래 대기가 게시물 감지 즉시 통과하므로 고정 안정화는 최소화
         outcome = _wait_for_list_or_app_error(driver, timeout=30)
         if outcome == 'items':
+            _mark("목록이 뜰 때까지(합계)")
             return True
         if outcome == 'error':
             log_func(f"{item_type_label} 목록 대신 키즈노트 자체 오류 화면이 감지되었습니다.")
