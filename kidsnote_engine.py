@@ -1122,15 +1122,18 @@ def navigate_to_memory_view(driver, item_type_label, log_func, target_child=None
         log_func("[KN-DIAG] 소요 %s: %s %.1f초" % (item_type_label, step, time.time() - _t0))
 
     try:
-        # 이미 /service 홈에 떠 있으면(반복 조회 등) SPA 전체 리로드를 생략해 시간 절약
-        if not _is_on_service_home(driver):
-            driver.get("https://www.kidsnote.com/service")
-            _mark("홈 재로드")
-        # 프로필 아바타가 렌더링되는 즉시 진행 (고정 2초 대기 제거)
-        wait_css(driver, ANY_AVATAR_CSS, timeout=10)
-        _mark("아바타 렌더링까지")
-
+        # 홈으로 가는 것은 아이를 바꿔야 할 때뿐이다. 아이 아바타가 거기에만 있기 때문이다.
+        # 바꿀 아이가 없으면 곧바로 목록 주소로 간다. 예전에는 이때도 홈을 한 번 불러왔는데,
+        # 그 화면은 바로 다음 줄의 목록 이동으로 버려져서 시간만 쓰는 일이었다.
+        # (측정: 홈 재로드 0.3초 + 아바타 렌더링 0.8초)
         if target_child:
+            if not _is_on_service_home(driver):
+                driver.get("https://www.kidsnote.com/service")
+                _mark("홈 재로드")
+            # 프로필 아바타가 렌더링되는 즉시 진행 (고정 2초 대기 제거)
+            wait_css(driver, ANY_AVATAR_CSS, timeout=10)
+            _mark("아바타 렌더링까지")
+
             try:
                 log_func(f"아이 전환 확인 중 (이름: {target_child})...")
                 script = """
@@ -1154,109 +1157,32 @@ def navigate_to_memory_view(driver, item_type_label, log_func, target_child=None
             except Exception as e:
                 log_func(f"아이 전환 중 예외 (무시): {e}")
 
-        # 추억보기 메뉴를 눌러 목록 화면으로 들어간다.
+        # 추억보기 메뉴는 더 이상 누르지 않는다.
+        # 바로 아래에서 목록 주소로 페이지를 새로 여는데, 메뉴 클릭이 바꾸는 것은
+        # 화면 상태뿐이라 그 이동으로 통째로 버려진다. 즉 눌러 봐야 시간만 쓴다.
+        # (측정: 메뉴를 찾고 누르는 데 0.2~1.0초)
+
+        # 목록 주소로 곧바로 들어간다.
         #
-        # 예전에는 '추억보기 메뉴가 눌릴 수 있게 될 때까지' 최대 20초를 기다렸는데,
-        # 앨범 차례에 이 메뉴를 찾지 못해 매번 20초를 통째로 버리고 있었다.
-        # (측정: 알림장은 목록까지 0.9초, 앨범은 21.0초 — 그중 20초가 이 대기였다)
+        # 예전에는 화면에서 '전체보기' 버튼을 찾아 눌렀다. 그런데 재 보니 그 클릭은
+        # 주소를 바꾸지 못했고, 뒤따르는 주소 확인이 5초를 다 쓰고 실패한 다음
+        # 결국 '주소로 직접 이동'이 매번 실제 진입을 해내고 있었다.
+        # (측정: 클릭 직후 0.3초 → 목록까지 6.4초. 그 6.1초 중 5초가 헛기다림이었다)
         #
-        # 메뉴가 뜰 거라면 곧바로 뜬다. 그래서 짧게 기다리되,
-        # '전체보기가 이미 보이는 상태'도 함께 본다. 그 경우 이미 목록 화면이므로
-        # 메뉴를 누를 이유가 없다.
-        #
-        # 이 지름길이 예전에 제거된 이유는 SPA에 남은 '이전 아이의 잔상 화면'을
-        # 목록으로 오판할 수 있어서였다. 여기서는 그 걱정이 없다.
-        #   - 바로 위에서 /service 를 새로 불러온 직후라 잔상이 아니다
-        #   - 아이 전환은 조회 시작 전에 이미 끝났다 (이 함수는 target_child 없이 불린다)
-        #   - 들어간 뒤 주소가 요청한 목록과 맞는지 아래에서 다시 확인한다
-        def _menu_button_or_list(d):
-            """추억보기 메뉴가 눌릴 수 있으면 그 요소를, 이미 목록 화면이면 'ready'를 준다."""
-            try:
-                if [b for b in d.find_elements(By.XPATH, VIEW_ALL_XPATH) if b.is_displayed()]:
-                    return 'ready'
-            except Exception:
-                pass
-            try:
-                for el in d.find_elements(By.XPATH, MEMORY_MENU_XPATH):
-                    if el.is_displayed() and el.is_enabled():
-                        return el
-            except Exception:
-                pass
+        # 주소로 가는 편이 빠르기만 한 게 아니라 더 안전하다. 버튼을 고르는 방식은
+        # 앨범인데 버튼이 하나뿐이면 알림장 버튼을 눌러, 알림장 글이 앨범으로
+        # 수집되는 조용한 오염이 생길 수 있었다. 주소에는 그런 모호함이 없다.
+        try:
+            driver.get(SECTION_URLS[item_type_label])
+            _mark("목록 주소로 이동")
+        except Exception as e:
+            log_func(f"{item_type_label} 목록으로 이동하지 못했습니다: {e}")
             return False
 
-        clicked = False
-        try:
-            found = WebDriverWait(driver, 5).until(_menu_button_or_list)
-            if found == 'ready':
-                _mark("이미 목록 화면(메뉴 생략)")
-                clicked = True
-            else:
-                driver.execute_script("arguments[0].click();", found)
-                _mark("추억보기 클릭까지")
-                clicked = True
-        except Exception:
-            pass
-
-        # 메뉴가 접혀 있는 화면이면 사이드바를 펼친 뒤 눌러야 한다
-        if not clicked:
-            try:
-                toggle = driver.find_element(By.XPATH, SIDEBAR_MENU_XPATH)
-                driver.execute_script("arguments[0].click();", toggle)
-                mem_link = WebDriverWait(driver, 15).until(
-                    EC.element_to_be_clickable((By.XPATH, MEMORY_MENU_LINK_XPATH))
-                )
-                driver.execute_script("arguments[0].click();", mem_link)
-                _mark("추억보기 클릭까지(펼쳐서)")
-            except Exception as e:
-                log_func(f"추억보기 진입 모두 실패: {e}")
-
-        # 전체보기 클릭
-        try:
-            # 실제 대기는 아래 WebDriverWait(전체보기 버튼 감지)가 담당한다 → 뜨는 즉시 진행
-            if item_type_label == "앨범":
-                try:
-                    target_btn = WebDriverWait(driver, 10).until(
-                        lambda d: (lambda btns: btns[1] if len(btns) >= 2 else None)([b for b in d.find_elements(By.XPATH, VIEW_ALL_XPATH) if b.is_displayed()])
-                    )
-                except TimeoutException:
-                    btns = [b for b in driver.find_elements(By.XPATH, VIEW_ALL_XPATH) if b.is_displayed()]
-                    target_btn = btns[0] if btns else None
-            else:
-                target_btn = WebDriverWait(driver, 10).until(
-                    lambda d: (lambda btns: btns[0] if btns else None)([b for b in d.find_elements(By.XPATH, VIEW_ALL_XPATH) if b.is_displayed()])
-                )
-
-            if target_btn:
-                _mark("전체보기 버튼 찾기까지")
-                driver.execute_script("arguments[0].click();", target_btn)
-            else:
-                # 버튼이 안 보인다고 바로 포기하지 않는다. 해당 목록은 고유 주소가 있으므로
-                # 주소로 직접 이동해서라도 진입한다. (앨범 진입이 종종 실패하던 원인)
-                log_func(f"{item_type_label} 전체보기 버튼이 보이지 않아 주소로 직접 이동합니다.")
-                driver.get(SECTION_URLS[item_type_label])
-        except Exception as e:
-            log_func(f"전체보기 버튼 클릭 실패: {e} → 주소로 직접 이동합니다.")
-            try:
-                driver.get(SECTION_URLS[item_type_label])
-            except Exception:
-                return False
-
-        _mark("전체보기 누른 직후")
-
-        # 엉뚱한 목록으로 갔는지 확인한다.
-        # 앨범인데 '전체보기' 버튼이 하나뿐이면 알림장 버튼을 누르게 되어,
-        # 알림장 글이 앨범으로 수집되는 조용한 오염이 생길 수 있다.
-        try:
-            expected = SECTION_URLS[item_type_label]
-            marker = expected.rsplit("/", 1)[-1]          # 'report' 또는 'album'
-            WebDriverWait(driver, 5).until(lambda d: marker in (d.current_url or ""))
-            _mark("주소 확인까지")
-        except Exception:
-            log_func(f"{item_type_label} 화면이 아닌 곳으로 이동한 것 같아 주소로 다시 진입합니다. (현재: {driver.current_url})")
-            try:
-                driver.get(SECTION_URLS[item_type_label])
-            except Exception:
-                return False
+        # 로그인 만료 등으로 엉뚱한 곳에 떨어졌는지만 본다. 정상이면 즉시 통과한다.
+        marker = SECTION_URLS[item_type_label].rsplit("/", 1)[-1]   # 'report' 또는 'album'
+        if marker not in (driver.current_url or ""):
+            log_func(f"[KN-DIAG] {item_type_label} 목록이 아닌 곳으로 갔습니다: {driver.current_url}")
 
         # 목록 항목 대기 (에러 화면이 뜨면 타임아웃을 기다리지 않고 즉시 빠져나옴)
         outcome = _wait_for_list_or_app_error(driver, timeout=30)
