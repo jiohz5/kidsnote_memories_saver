@@ -1241,6 +1241,8 @@ def navigate_to_memory_view(driver, item_type_label, log_func, target_child=None
             except Exception:
                 return False
 
+        _mark("전체보기 누른 직후")
+
         # 엉뚱한 목록으로 갔는지 확인한다.
         # 앨범인데 '전체보기' 버튼이 하나뿐이면 알림장 버튼을 누르게 되어,
         # 알림장 글이 앨범으로 수집되는 조용한 오염이 생길 수 있다.
@@ -1248,6 +1250,7 @@ def navigate_to_memory_view(driver, item_type_label, log_func, target_child=None
             expected = SECTION_URLS[item_type_label]
             marker = expected.rsplit("/", 1)[-1]          # 'report' 또는 'album'
             WebDriverWait(driver, 5).until(lambda d: marker in (d.current_url or ""))
+            _mark("주소 확인까지")
         except Exception:
             log_func(f"{item_type_label} 화면이 아닌 곳으로 이동한 것 같아 주소로 다시 진입합니다. (현재: {driver.current_url})")
             try:
