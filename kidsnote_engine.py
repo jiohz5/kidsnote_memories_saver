@@ -827,7 +827,8 @@ def save_debug_snapshot(driver, step_name, log_func=print, mem=None):
         log_func(f"[DEBUG LOG] 스냅샷 저장 실패: {e}")
 
 
-def _scrape_list_pages(driver, item_type, memories, log, item_found_callback=None, check_stop_callback=None, limit_date_str=None, child_name=None, result_info=None, end_date_str=None):
+def _scrape_list_pages(driver, item_type, memories, log,
+                       request=None, callbacks=None, result_info=None):
     """
     Helper to scrape all pages of a list (Report or Album).
     Yields or callbacks items as they are found.
@@ -836,6 +837,14 @@ def _scrape_list_pages(driver, item_type, memories, log, item_found_callback=Non
     result_info(dict)에 조회 결과 진단 정보를 기록해 GUI가
     '기간 내 항목 없음'과 '네트워크 실패'를 구분해 안내할 수 있게 한다.
     """
+    request = request or ScrapeRequest()
+    callbacks = callbacks or ScrapeCallbacks()
+    item_found_callback = callbacks.item_found
+    check_stop_callback = callbacks.check_stop
+    limit_date_str = request.start_date
+    end_date_str = request.end_date
+    child_name = request.child_name
+
     info = result_info if isinstance(result_info, dict) else {}
     page_count = 1
     log(f"DEBUG: _scrape_list_pages 시작. 대상: {item_type}, 현재 URL: {driver.current_url}")
@@ -1215,13 +1224,88 @@ def navigate_to_memory_view(driver, item_type_label, log_func, target_child=None
         
 
 
-def fetch_memory_list(driver, status_callback=None, item_found_callback=None, check_stop_callback=None, scrape_reports=True, scrape_albums=True, profile_found_callback=None, limit_date_str=None, child_name=None, result_info=None, end_date_str=None):
+class ScrapeRequest(object):
+    """무엇을 조회할지. 조회 한 번에 대한 요청서다.
+
+    인자 열한 개를 늘어놓던 것을 묶었다. 그중 다섯은 '무엇을 조회할지'(여기),
+    넷은 '진행 상황을 어디로 알릴지'(ScrapeCallbacks), 하나는 결과 진단용이라
+    성격이 서로 달랐다.
+
+    start_date / end_date 는 'yyyy.mm.dd' 문자열이다. 둘 다 None 이면 기간을
+    가리지 않고 전부 가져온다 (화면의 [전체]).
     """
-    Fetches the list of memories by navigating directly to /service/report and /service/album.
-    If child_name is provided, navigate to /service first and click the child with that name.
-    limit_date_str~end_date_str (yyyy.mm.dd) 범위의 게시물만 수집한다.
-    result_info(dict)를 넘기면 조회 결과 진단 정보(list_loaded/items_seen/filtered_out/timeout/nav_failed)를 기록한다.
+
+    __slots__ = ('reports', 'albums', 'start_date', 'end_date', 'child_name')
+
+    def __init__(self, reports=True, albums=True,
+                 start_date=None, end_date=None, child_name=None):
+        self.reports = reports          # 알림장을 가져올까
+        self.albums = albums            # 앨범을 가져올까
+        self.start_date = start_date    # 이 날짜보다 오래된 글은 건너뛴다
+        self.end_date = end_date        # 이 날짜보다 최근 글은 건너뛴다
+        self.child_name = child_name    # 이 아이로 전환한 뒤 조회한다
+
+    @property
+    def labels(self):
+        """조회할 대상 이름들. 화면 표기와 같은 말을 쓴다."""
+        names = []
+        if self.reports:
+            names.append("알림장")
+        if self.albums:
+            names.append("앨범")
+        return names
+
+    def __repr__(self):
+        return "ScrapeRequest(reports=%r, albums=%r, %s~%s)" % (
+            self.reports, self.albums, self.start_date, self.end_date)
+
+
+class ScrapeCallbacks(object):
+    """조회하면서 알려 줄 곳들. 모두 없어도 된다(그러면 조용히 진행한다).
+
+    엔진이 GUI를 직접 만지지 않게 하려고 함수로 받는다. 무엇을 하는 함수인지는
+    부르는 쪽이 정한다. GUI는 여기에 Qt 시그널을 꽂아 화면을 갱신한다.
     """
+
+    __slots__ = ('status', 'item_found', 'profile_found', 'check_stop')
+
+    def __init__(self, status=None, item_found=None,
+                 profile_found=None, check_stop=None):
+        self.status = status                # 진행 문구 한 줄
+        self.item_found = item_found        # 게시물 하나를 찾을 때마다
+        self.profile_found = profile_found  # 아이 프로필을 확보했을 때
+        self.check_stop = check_stop        # 사용자가 중지를 눌렀는지 물어볼 함수
+
+    def stopped(self):
+        return bool(self.check_stop and self.check_stop())
+
+
+def fetch_memory_list(driver, request=None, callbacks=None, result_info=None):
+    """알림장과 앨범 목록을 훑어 게시물 정보를 모아 온다.
+
+    request(ScrapeRequest)가 무엇을 가져올지, callbacks(ScrapeCallbacks)가
+    진행 상황을 어디로 알릴지 정한다. 생략하면 기본값으로 전부 조회한다.
+
+    아이 이름이 주어지면 먼저 그 아이로 전환한 뒤 조회한다.
+
+    result_info(dict)를 넘기면 조회 결과 진단 정보를 기록한다
+    (list_loaded / items_seen / filtered_out / timeout / nav_failed).
+    '기간 안에 글이 없었다'와 '조회가 실패했다'는 둘 다 0건으로 끝나지만
+    사용자에게는 전혀 다른 이야기라, GUI가 이 값을 보고 구분해서 안내한다.
+    """
+    request = request or ScrapeRequest()
+    callbacks = callbacks or ScrapeCallbacks()
+
+    status_callback = callbacks.status
+    item_found_callback = callbacks.item_found
+    check_stop_callback = callbacks.check_stop
+    profile_found_callback = callbacks.profile_found
+    scrape_reports = request.reports
+    scrape_albums = request.albums
+    limit_date_str = request.start_date
+    end_date_str = request.end_date
+    child_name = request.child_name
+
     def log(msg):
         print(msg) # 터미널에도 출력
         if status_callback and 'DEBUG' not in msg:
@@ -1336,7 +1420,9 @@ def fetch_memory_list(driver, status_callback=None, item_found_callback=None, ch
             if navigate_to_memory_view(driver, label, log, target_child=None):
                 nav_ok = True
                 log(f"{label} 전수 조사를 시작합니다...")
-                _scrape_list_pages(driver, label, memories, log, item_found_callback, check_stop_callback, limit_date_str, child_name, result_info=attempt_info, end_date_str=end_date_str)
+                _scrape_list_pages(driver, label, memories, log,
+                                   request=request, callbacks=callbacks,
+                                   result_info=attempt_info)
             collected = len(memories) - before
 
             app_error = collected == 0 and (attempt_info.get('app_error') or _detect_kidsnote_app_error(driver))

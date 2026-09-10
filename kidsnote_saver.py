@@ -96,16 +96,20 @@ class ScrapeThread(QtCore.QThread):
         try:
             memories = manager.fetch_memory_list(
                 self.driver,
-                status_callback=self.status_signal.emit,
-                item_found_callback=self.item_found_signal.emit,
-                check_stop_callback=self.check_stopped,
-                scrape_reports=self.scrape_reports,
-                scrape_albums=self.scrape_albums,
-                profile_found_callback=self.profile_signal.emit,
-                limit_date_str=self.limit_date_str,
-                child_name=self.child_name,
+                request=manager.ScrapeRequest(
+                    reports=self.scrape_reports,
+                    albums=self.scrape_albums,
+                    start_date=self.limit_date_str,
+                    end_date=self.end_date_str,
+                    child_name=self.child_name,
+                ),
+                callbacks=manager.ScrapeCallbacks(
+                    status=self.status_signal.emit,
+                    item_found=self.item_found_signal.emit,
+                    profile_found=self.profile_signal.emit,
+                    check_stop=self.check_stopped,
+                ),
                 result_info=self.result_info,
-                end_date_str=self.end_date_str
             )
             self.finished_signal.emit(memories)
         except Exception as e:
