@@ -59,30 +59,63 @@ class PostDate(object):
             other.raw, other.folder, other.prefix, other.parsed)
 
 
+def parse_ymd(text, today=None):
+    """날짜 문자열에서 (연, 월, 일) 정수를 읽는다. 못 읽으면 None.
+
+    이 프로그램에서 날짜를 해석하는 곳은 전부 이 함수를 거친다. 예전에는 같은
+    정규식이 다섯 군데에 복사되어 있었고, 그중 테스트가 있는 곳은 하나뿐이었다.
+    다섯 곳은 각각 다른 것을 정했다. 어떤 글을 수집할지, 어떤 글을 내려받을지,
+    폴더 이름, 사진 파일 이름, 파일 시각. 한 곳만 고치면 나머지가 어긋난다.
+
+    숫자 표기('2026.7.4')가 한글 표기보다 먼저다. 둘 다 있으면 숫자 쪽을 쓴다.
+    연도가 없는 한글 표기('7월 14일')는 올해로 본다. 키즈노트 목록은 올해 글에서
+    연도를 생략하기 때문이다.
+
+    여기서는 문자열을 다듬지 않는다. 다듬는 방식은 부르는 쪽마다 다르고,
+    그 차이가 지금까지 쌓인 결과물에 이미 반영되어 있기 때문이다.
+    """
+    text = text or ""
+    numeric = _DATE_NUMERIC.search(text)
+    if numeric:
+        year, month, day = numeric.groups()
+        return int(year), int(month), int(day)
+    korean = _DATE_KOREAN.search(text)
+    if korean:
+        year = korean.group(1)
+        year = int(year) if year else (today or datetime.date.today()).year
+        return year, int(korean.group(2)), int(korean.group(3))
+    return None
+
+
+def normalize_list_date(raw, today=None):
+    """목록 카드에 적힌 날짜를 'yyyy.MM.dd' 로 바꾼다. 못 읽으면 원문 그대로 둔다.
+
+    이 결과는 세 곳에서 똑같아야 한다.
+      - 조회 기간 거르기: 'yyyy.MM.dd' 끼리 문자열로 비교하므로 자릿수가 맞아야 한다
+      - 게시물 id: 증분 백업 기록에 이 표기 그대로 쌓여 있다
+      - 내려받을 글 찾기: 목록에서 만든 날짜와 같은지로 글을 알아본다
+    """
+    ymd = parse_ymd(raw, today)
+    if not ymd:
+        return raw
+    return "%04d.%02d.%02d" % ymd
+
+
 def parse_post_date(raw_date, today=None):
     """게시물에 적힌 날짜 문자열을 폴더용·파일용 표기로 바꾼다.
 
     날짜 해석은 반드시 구분자가 살아 있는 원문으로 한다.
     점을 먼저 지우고 파싱하면 '2026.7.4' 가 '202674' 가 되어 자릿수 경계가 사라진다.
-
-    연도가 없는 한글 표기('7월 14일')는 올해로 본다. 키즈노트 목록은 올해 글에서
-    연도를 생략하기 때문이다.
     """
     raw_clean = re.sub(_FORBIDDEN, "", raw_date or "").strip().rstrip('.')
 
-    numeric = _DATE_NUMERIC.search(raw_clean)
-    korean = _DATE_KOREAN.search(raw_clean)
-    if numeric:
-        year, month, day = numeric.groups()
-    elif korean:
-        year = korean.group(1) or (today or datetime.date.today()).year
-        month, day = korean.group(2), korean.group(3)
-    else:
+    ymd = parse_ymd(raw_clean, today)
+    if not ymd:
         # 해석 실패: 점만 지운 원문을 폴더 이름으로 그대로 쓴다
         fallback = raw_clean.replace('.', '') or raw_clean
         return PostDate(raw_clean, fallback, fallback, False)
 
-    year, month, day = int(year), int(month), int(day)
+    year, month, day = ymd
     return PostDate(
         raw_clean,
         "%04d%02d%02d" % (year, month, day),

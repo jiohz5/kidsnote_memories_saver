@@ -12,6 +12,9 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
+# 날짜 해석은 kidsnote_paths 한 곳에서만 한다 (예전에는 다섯 군데에 복사돼 있었다)
+import kidsnote_paths as paths
+
 # 사내망 SSL 검사 프록시 등에서 인증서 검증이 불가능할 때만 예외적으로 비검증 모드로 전환.
 # KIDSNOTE_TLS_NO_VERIFY=1 환경변수로 처음부터 강제할 수도 있음.
 _TLS_INSECURE = os.environ.get("KIDSNOTE_TLS_NO_VERIFY", "") == "1"
@@ -738,26 +741,17 @@ def _stop_requested(check_stop_callback):
 
 
 def _media_prefix(post_info):
-    """게시물 정보로부터 미디어 파일명 prefix(YYMMDD_종류[_순번])를 생성합니다."""
-    import re
+    """게시물 정보로부터 미디어 파일명 prefix(YYMMDD_종류[_순번])를 생성합니다.
+
+    날짜를 못 읽으면 'unknown' 을 쓴다. PDF 쪽(kidsnote_paths)은 이때 원문을 쓰므로
+    같은 글의 PDF와 사진 이름 앞부분이 달라진다. 맞추고 싶지만, 바꾸면 이미 받아 둔
+    사진의 이름과 어긋나 '이미 받은 사진' 판단이 깨지므로 지금은 그대로 둔다.
+    """
     date_prefix = "unknown"
-    try:
-        date_str = post_info.get("date", "") or ""
-        match_dot = re.search(r'(\d{4})\.?\s*(\d{1,2})\.?\s*(\d{1,2})', date_str)
-        match_kor = re.search(r'(?:(\d{4})\s*년)?\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일', date_str)
-        current_year = datetime.date.today().year
-        if match_dot:
-            y, m, d = match_dot.groups()
-        elif match_kor:
-            y = match_kor.group(1) or current_year
-            m = match_kor.group(2)
-            d = match_kor.group(3)
-        else:
-            y, m, d = None, None, None
-        if y and m and d:
-            date_prefix = f"{str(y)[-2:]}{int(m):02d}{int(d):02d}"
-    except Exception:
-        date_prefix = "unknown"
+    ymd = paths.parse_ymd(post_info.get("date", "") or "")
+    if ymd:
+        year, month, day = ymd
+        date_prefix = "%02d%02d%02d" % (year % 100, month, day)
 
     post_index = post_info.get('post_index', 0)
     item_type = post_info.get('type', '사진')
@@ -770,22 +764,13 @@ def _post_timestamp(post_info):
     저장된 사진/PDF의 파일 시간을 게시물 날짜로 맞춰
     갤러리/탐색기에서 실제 추억 순서대로 정렬되게 한다.
     """
-    import re
-    date_str = post_info.get("date", "") or ""
-    match_dot = re.search(r'(\d{4})\.?\s*(\d{1,2})\.?\s*(\d{1,2})', date_str)
-    match_kor = re.search(r'(?:(\d{4})\s*년)?\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일', date_str)
-    try:
-        if match_dot:
-            y, m, d = match_dot.groups()
-        elif match_kor:
-            y = match_kor.group(1) or datetime.date.today().year
-            m = match_kor.group(2)
-            d = match_kor.group(3)
-        else:
-            return None
-        return datetime.datetime(int(y), int(m), int(d), 12, 0, 0).timestamp()
-    except Exception:
+    ymd = paths.parse_ymd(post_info.get("date", "") or "")
+    if not ymd:
         return None
+    try:
+        return datetime.datetime(ymd[0], ymd[1], ymd[2], 12, 0, 0).timestamp()
+    except Exception:
+        return None   # 13월 같은 있을 수 없는 날짜
 
 
 def _apply_post_timestamp(path, post_info):
@@ -1014,20 +999,9 @@ def _scrape_list_pages(driver, item_type, memories, log,
                     except Exception:
                         # 클래스가 바뀐 경우: 카드 텍스트에서 날짜 형태를 직접 찾는다
                         raw_date = _first_date_like_line(post) or "날짜 알 수 없음"
-                date = raw_date
-                if date != "날짜 알 수 없음" and date:
-                    import re, datetime
-                    match_dot = re.search(r'(\d{4})\.?\s*(\d{1,2})\.?\s*(\d{1,2})', date)
-                    match_kor = re.search(r'(?:(\d{4})\s*년)?\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일', date)
-                    current_year = datetime.date.today().year
-                    if match_dot:
-                        y, m, d = match_dot.groups()
-                        date = f"{y}.{int(m):02d}.{int(d):02d}"
-                    elif match_kor:
-                        y = match_kor.group(1) or current_year
-                        m = match_kor.group(2)
-                        d = match_kor.group(3)
-                        date = f"{y}.{int(m):02d}.{int(d):02d}"
+                # 'yyyy.MM.dd' 로 맞춘다. 아래 기간 거르기가 문자열 비교라 자릿수가
+                # 맞아야 하고, 이 값은 id 와 '내려받을 글 찾기'에도 그대로 쓰인다.
+                date = paths.normalize_list_date(raw_date)
                 
                 # 제목/내용 추출
                 try:
@@ -1999,27 +1973,15 @@ def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None,
                     try: raw_date = post.find_element(By.XPATH, CARD_DATE_XPATH).text.strip()
                     except Exception: raw_date = post.find_element(By.CLASS_NAME, CARD_DATE_CLASS).find_element(By.TAG_NAME, "span").text.strip()
                     
-                    d = raw_date
-                    if d and d != "날짜 알 수 없음":
-                        import datetime, re
-                        match_dot = re.search(r'(\d{4})\.?\s*(\d{1,2})\.?\s*(\d{1,2})', d)
-                        match_kor = re.search(r'(?:(\d{4})\s*년)?\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일', d)
-                        current_year = datetime.date.today().year
-                        if match_dot:
-                            y, m, day = match_dot.groups()
-                            d = f"{y}.{int(m):02d}.{int(day):02d}"
-                        elif match_kor:
-                            y = match_kor.group(1) or current_year
-                            m = match_kor.group(2)
-                            day = match_kor.group(3)
-                            d = f"{y}.{int(m):02d}.{int(day):02d}"
-                    
+                    # 목록에서 이 글을 수집할 때와 똑같은 방식으로 날짜와 제목을 만든다.
+                    # 주소를 못 찾은 글(지금까지 전부 그랬다)은 날짜+제목이 같은지로만
+                    # 알아보므로, 여기서 한 글자라도 다르게 만들면 내려받을 글을 못 찾는다.
+                    d = paths.normalize_list_date(raw_date)
                     try:
-                        full_text = post.find_element(By.XPATH, CARD_BODY_XPATH).text.strip()
-                        t = full_text[:35].replace('\n', ' ') + "..." if len(full_text) > 35 else full_text.replace('\n', ' ')
+                        t = format_list_title(post.find_element(By.XPATH, CARD_BODY_XPATH).text)
                     except Exception:
                         try:
-                            t = post.find_element(By.CLASS_NAME, CARD_BODY_CLASS).text.strip()[:35]
+                            t = format_list_title(post.find_element(By.CLASS_NAME, CARD_BODY_CLASS).text)
                         except Exception:
                             t = ""
 
