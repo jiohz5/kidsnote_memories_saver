@@ -835,6 +835,41 @@ def save_debug_snapshot(driver, step_name, log_func=print, mem=None):
         log_func(f"[DEBUG LOG] 스냅샷 저장 실패: {e}")
 
 
+# ---------------------------------------------------------------------------
+# 게시물의 신원(id)
+#
+# 이 id는 증분 백업 기록(downloaded_items.json)에 그대로 쌓이고, [새 항목만 선택]과
+# 표의 'O' 표시가 이것으로 '이미 받은 글'을 알아본다. 그래서 형식이 조금만 바뀌어도
+# 이미 받은 글 전부가 새 글로 보이게 된다. (2026-10 기준 한 사용자 PC에 1625건)
+#
+# 이 형식은 바꾸지 않는다. 날짜 표기, 제목 자르는 방식, 구분자, 주소 자리의
+# 'None' 까지 전부 계약이다. tests/memory_id_check.py 가 이것을 고정한다.
+# ---------------------------------------------------------------------------
+LIST_TITLE_LIMIT = 35
+
+
+def format_list_title(full_text):
+    """목록 카드 본문을 표에 보일 제목으로 만든다. id 의 일부이기도 하다.
+
+    35자를 넘으면 앞 35자만 남기고 '...'을 붙인다. 줄바꿈은 공백으로 바꾼다.
+    자르는 것이 먼저고 줄바꿈 바꾸기가 나중이다. 지금까지 쌓인 기록이 이 순서로
+    만들어졌으므로 그대로 지킨다.
+    """
+    text = (full_text or "").strip()
+    if len(text) > LIST_TITLE_LIMIT:
+        return text[:LIST_TITLE_LIMIT].replace('\n', ' ') + "..."
+    return text.replace('\n', ' ')
+
+
+def make_memory_id(item_type, date, title, url):
+    """게시물 하나를 가리키는 id. 형식: 유형_날짜_제목_주소
+
+    주소를 못 찾으면 그 자리에 문자열 'None' 이 들어간다. 지금까지 쌓인 기록이
+    전부 그렇게 되어 있으므로, 'None' 을 빈 문자열로 '고치면' 안 된다.
+    """
+    return f"{item_type}_{date}_{title}_{url}"
+
+
 def _scrape_list_pages(driver, item_type, memories, log,
                        request=None, callbacks=None, result_info=None):
     """
@@ -998,12 +1033,15 @@ def _scrape_list_pages(driver, item_type, memories, log,
                 try:
                     # 알림장의 경우 보통 본문이 제목 역할을 함
                     title_elem = post.find_element(By.XPATH, CARD_BODY_XPATH)
-                    full_text = title_elem.text.strip()
-                    title = full_text[:35].replace('\n', ' ') + "..." if len(full_text) > 35 else full_text.replace('\n', ' ')
+                    title = format_list_title(title_elem.text)
                 except NoSuchElementException:
                     try:
+                        # 예비 셀렉터로 찾았어도 제목은 같은 규칙으로 만든다.
+                        # 예전에는 여기서만 '...'도 줄바꿈 처리도 없이 잘라서, 키즈노트가
+                        # 화면을 바꿔 이쪽으로 빠지는 순간 모든 글의 id가 달라졌다.
+                        # 그러면 이미 받은 글이 전부 새 글로 보인다.
                         title_elem = post.find_element(By.CLASS_NAME, CARD_BODY_CLASS)
-                        title = title_elem.text.strip()[:35]
+                        title = format_list_title(title_elem.text)
                     except Exception:
                         # 클래스가 바뀐 경우: 카드 텍스트에서 날짜/작성자가 아닌 가장 긴 줄을 본문으로 본다
                         title = _longest_content_line(post) or "제목 알 수 없음"
@@ -1034,7 +1072,7 @@ def _scrape_list_pages(driver, item_type, memories, log,
                     log(f"DEBUG: 항목 {idx}: 빈(스켈레톤) 카드로 판단되어 제외")
                     continue
 
-                item_id = f"{item_type}_{date}_{title}_{url}"
+                item_id = make_memory_id(item_type, date, title, url)
                 if not any(m.get('id') == item_id for m in memories):
                     new_mem = {
                         'id': item_id,
