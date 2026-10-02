@@ -205,6 +205,8 @@ class DownloadThread(QtCore.QThread):
         success_cnt = 0
         fail_cnt = 0
         started_at = time.time()
+        # 단계별 소요를 이번 다운로드분만 따로 잰다 (처음 몇 건과 요약이 진단정보에 남는다)
+        manager.begin_download_stats()
         try:
             write_app_log(f"Download thread started. selected={len(self.indices)} pdf={self.is_pdf} both={self.is_both} single_folder={self.is_single_folder}")
 
@@ -380,6 +382,11 @@ class DownloadThread(QtCore.QThread):
             except OSError:
                 pass
             self.elapsed_sec = int(time.time() - started_at)
+            summary = manager.end_download_stats()
+            if summary:
+                # 로그 파일에만 남긴다. [진단정보 복사]가 여기서 가져간다.
+                # 상태줄로 보내면 바로 앞의 '다운로드 완료' 안내를 이 기술적인 줄이 덮어쓴다.
+                write_app_log(summary)
             write_app_log(f"Download thread finished. success={success_cnt} fail={fail_cnt} stopped={self.is_stopped} elapsed={self.elapsed_sec}s")
             self.finished_signal.emit(self.target_dir, success_cnt, fail_cnt, self.is_stopped)
 

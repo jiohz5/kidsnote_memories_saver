@@ -1985,6 +1985,58 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
         log(f"사진/동영상 다운로드 오류: {e}")
         return False
 
+
+# ---------------------------------------------------------------------------
+# 다운로드 단계별 소요 측정
+#
+# 한 글을 받는 데 고정 대기만 PDF 약 10초, 사진 약 6초가 들어간다. 그런데 이 대기들은
+# 목록 진입 때와 달리 '아무 일도 안 하는 대기'가 아니다. 예를 들어 글을 누른 뒤의
+# 2초를 빼면, 사진 저장 쪽이 방금 떠난 목록 화면의 썸네일을 그 글의 사진으로 알고
+# 저장할 수 있다. 그래서 줄이기 전에 어디서 시간이 가는지부터 잰다.
+#
+# 특히 '글 찾기'를 본다. 주소가 없는 글(지금까지 전부)은 목록으로 돌아가 날짜+제목으로
+# 찾는데, 못 찾으면 홈부터 다시 들어가 그 페이지까지 넘긴다. 이게 자주 일어나면
+# 고정 대기보다 이쪽이 훨씬 크다.
+#
+# 처음 몇 건은 한 줄씩, 끝나면 요약 한 줄을 [KN-DIAG] 로 남긴다 (진단정보 복사에 담긴다).
+# ---------------------------------------------------------------------------
+_DL_DETAIL_ITEMS = 3
+_dl_stats = {}
+
+
+def begin_download_stats():
+    """다운로드 한 번을 시작할 때 부른다. 측정값을 비운다."""
+    _dl_stats.clear()
+    _dl_stats.update({"items": 0, "find": 0.0, "open": 0.0, "save": 0.0, "back": 0.0,
+                      "how": {}})
+
+
+def _record_download_timing(how, find, open_, save, back, log):
+    if not _dl_stats:
+        begin_download_stats()
+    _dl_stats["items"] += 1
+    _dl_stats["find"] += find
+    _dl_stats["open"] += open_
+    _dl_stats["save"] += save
+    _dl_stats["back"] += back
+    _dl_stats["how"][how] = _dl_stats["how"].get(how, 0) + 1
+    if _dl_stats["items"] <= _DL_DETAIL_ITEMS:
+        log("[KN-DIAG] 소요 다운로드 #%d: 찾기 %.1f초(%s) | 열기 %.1f초 | 저장 %.1f초 | 목록복귀 %.1f초"
+            % (_dl_stats["items"], find, how, open_, save, back))
+
+
+def end_download_stats():
+    """다운로드 한 번이 끝나면 부른다. 요약 한 줄(없으면 빈 문자열)을 돌려준다."""
+    n = _dl_stats.get("items", 0)
+    if not n:
+        return ""
+    how = ", ".join("%s %d" % (k, v) for k, v in sorted(_dl_stats["how"].items(), key=lambda x: -x[1]))
+    return ("[KN-DIAG] 소요 다운로드 요약 | %d건 | 평균 찾기 %.1f초(%s) | 열기 %.1f초 | "
+            "저장 %.1f초 | 목록복귀 %.1f초"
+            % (n, _dl_stats["find"] / n, how, _dl_stats["open"] / n,
+               _dl_stats["save"] / n, _dl_stats["back"] / n))
+
+
 def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None, is_overwrite_allow=True, check_stop_callback=None, include_video=True, prefer_browser_fetch=False):
     """
     Handles robust navigation to the detail page and downloads it.
@@ -2068,10 +2120,12 @@ def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None,
             return None
 
         # 1. Check if it's already on the screen (e.g. from a previous driver.back())
+        _t0 = time.time()
         if _stop_requested(check_stop_callback):
             log("다운로드가 중지되었습니다.")
             return False
         found_post = _find_target()
+        found_how = "바로"
 
         # 2. Check if it's on the next screen (for consecutive downloads crossing page boundaries)
         if not found_post:
@@ -2091,7 +2145,9 @@ def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None,
                             break
                     if found_next:
                         found_post = _find_target()
-                        if found_post: break
+                        if found_post:
+                            found_how = "다음 페이지"
+                            break
                     else:
                         break
             except Exception:
@@ -2143,25 +2199,36 @@ def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None,
                 log("목록 항목을 로드하는 데 시간이 초과되었습니다.")
 
             found_post = _find_target()
-        
+            found_how = "재진입"
+
         if found_post:
             if _stop_requested(check_stop_callback):
                 log("다운로드가 중지되었습니다.")
                 return False
+            _t_found = time.time()
             driver.execute_script("arguments[0].click();", found_post)
+            # 이 2초는 지우면 안 된다. 사진 저장 쪽은 '이미지가 보이면 준비됨'으로 판단하는데,
+            # 상세 화면으로 바뀌기 전에는 목록의 썸네일이 그대로 보여서 그것을 이 글의
+            # 사진으로 알고 저장할 수 있다. 줄이려면 '상세 화면으로 바뀌었다'는 조건이 필요하다.
             if _sleep_with_stop(2, check_stop_callback):  # 상세 페이지 완전 로딩 대기 (댓글 로드를 위해 2초로 연장)
                 log("다운로드가 중지되었습니다.")
                 return False
             save_debug_snapshot(driver, f"Opened_{mem['type']}_Detail", status_callback, mem=mem)
-            
+            _t_open = time.time()
+
             if is_pdf:
                 res = download_as_pdf(driver, mem, target_path_or_dir, status_callback, check_stop_callback)
             else:
                 res = download_photos_only(driver, mem, target_path_or_dir, status_callback, check_stop_callback, include_video, prefer_browser_fetch)
-            
+            _t_saved = time.time()
+
             # 다운로드 완료 후 뒤로가기를 호출하여 리스트 상태로 복귀!! (이것이 속도의 핵심)
+            # 1.5초도 함부로 줄이지 않는다. 목록이 다 그려지기 전에 다음 글을 찾으면 못 찾고,
+            # 그러면 홈부터 다시 들어가는 훨씬 느린 길로 빠진다.
             driver.back()
             time.sleep(1.5)
+            _record_download_timing(found_how, _t_found - _t0, _t_open - _t_found,
+                                    _t_saved - _t_open, time.time() - _t_saved, log)
             return res
         else:
             log("해당 위치에 게시물이 존재하지 않습니다. (날짜/제목 불일치)")
