@@ -12,6 +12,9 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
+# 날짜 해석은 kidsnote_paths 한 곳에서만 한다 (예전에는 다섯 군데에 복사돼 있었다)
+import kidsnote_paths as paths
+
 # 사내망 SSL 검사 프록시 등에서 인증서 검증이 불가능할 때만 예외적으로 비검증 모드로 전환.
 # KIDSNOTE_TLS_NO_VERIFY=1 환경변수로 처음부터 강제할 수도 있음.
 _TLS_INSECURE = os.environ.get("KIDSNOTE_TLS_NO_VERIFY", "") == "1"
@@ -194,23 +197,17 @@ CARD_DATE_XPATH = ".//div[contains(@class, 'exa4ze65')]/div"   # 카드 안 날�
 CARD_DATE_CLASS = "css-15xrcbi"                      # 날짜 폴백
 CARD_BODY_XPATH = ".//div[contains(@class, 'e14iqn2g4')]"      # 카드 안 본문/제목
 CARD_BODY_CLASS = "css-12g7lcb"                      # 본문 폴백
-MEMORY_MENU_CLASS = "e1q0zrbj0"                      # 사이드바 '추억보기'
-MEMORY_MENU_LINK_CLASS = "e1efjxmz8"                 # 드롭다운 '추억보기'
 ALBUM_BODY_CLASS = "css-1469k6q"                     # 앨범 상세 본문 영역
 
+# 목록에는 주소(SECTION_URLS)로 바로 들어간다. 예전에 쓰던 '추억보기' 메뉴와
+# '전체보기' 버튼 셀렉터는 그 클릭이 실제로는 아무 일도 하지 않는 것으로 밝혀져 지웠다.
 # 여러 곳에서 쓰는 것들. 키즈노트가 화면을 바꾸면 여기부터 확인한다.
 # (예전에는 같은 XPath가 세 군데에 흩어져 있어, 한 곳만 고치고 넘어가기 쉬웠다)
-VIEW_ALL_XPATH = "//*[contains(text(),'전체보기')]"                    # 목록 '전체보기' 버튼
 NEXT_PAGE_XPATH = "//button[.//span[starts-with(text(), '다음')]]"     # 다음 페이지 버튼
-SIDEBAR_MENU_XPATH = "//*[@data-testid='center-sidebar-menu-select']"  # 사이드바 메뉴
 ACTIVE_AVATAR_XPATH = "//*[@size='65' and @role='img']"                # 선택된 아이의 큰 아바타
 ANY_AVATAR_CSS = "span[role='img']"                                    # 아바타 아무거나(화면 준비 확인용)
 CHILD_AVATAR_CSS = "span[role='img'][size='36']"                       # 아이 목록의 작은 아바타(선택용)
 ACTIVE_AVATAR_CSS = "span[role='img'][size='65']"                      # 선택된 아이의 큰 아바타
-
-# 사이드바의 '추억보기'. 접힌 화면에서는 아래쪽(드롭다운) 것을 눌러야 한다.
-MEMORY_MENU_XPATH = "//*[contains(@class,'%s') and contains(.,'추억보기')]" % MEMORY_MENU_CLASS
-MEMORY_MENU_LINK_XPATH = "//*[contains(@class,'%s') and contains(.,'추억보기')]" % MEMORY_MENU_LINK_CLASS
 
 
 def post_card_xpath():
@@ -618,45 +615,62 @@ def _element_screenshot_b64(element, log=None):
         return ""
 
 
-def get_profile_image_b64(driver, url, log=None):
+def get_profile_image_b64(driver, urls, log=None, browser_timeout=15,
+                          requests_timeout=5, capture=True):
     """프로필(아이 얼굴) 이미지를 가장 견고한 방법으로 확보해 base64 반환.
 
     순서: ① 브라우저 fetch(원본 화질, 사내망에서도 브라우저 네트워크는 대개 열림)
          ② 파이썬 requests 세션
          ③ 화면의 활성 아바타 요소 캡처(무엇도 안 될 때 최후, 표시 해상도)
     모두 실패하면 [KN-DIAG] 태그로 세 방법의 사유를 한 줄에 남긴다(사용자 복사용).
+
+    urls 는 주소 하나이거나 주소 목록이다. 목록이면 ①을 전부 시도한 뒤 ②로 넘어간다.
+    (같은 사진도 해상도별로 주소가 따로 있어 어느 것이 살아 있는지 받아 봐야 안다)
+
+    예전에는 같은 일을 하는 _fetch_profile_bytes 가 따로 있었다. 차이는 주소 목록,
+    대기 시간, ③을 하느냐뿐이어서 인자로 합쳤다. 아이 목록을 읽을 때(fetch_children)는
+    화면 캡처를 미리 따로 해 두므로 capture=False 로 부른다.
     """
     def _log(msg):
         if log:
             log(msg)
 
+    if isinstance(urls, str) or urls is None:
+        urls = [urls] if urls else []
+
     fetch_r = req_r = shot_r = "미시도"
 
     # ① 브라우저 컨텍스트 fetch
-    if url:
-        try:
-            data, status = _browser_fetch_media(driver, url, timeout=15)
-            if data:
-                _log("[KN-DIAG] 프로필 성공(브라우저fetch)")
-                return base64.b64encode(data).decode('utf-8')
-            fetch_r = status
-        except Exception as e:
-            fetch_r = f"EXC:{type(e).__name__}"
+    if urls:
+        for url in urls:
+            try:
+                data, status = _browser_fetch_media(driver, url, timeout=browser_timeout)
+                if data:
+                    _log("[KN-DIAG] 프로필 성공(브라우저fetch)")
+                    return base64.b64encode(data).decode('utf-8')
+                fetch_r = status
+            except Exception as e:
+                fetch_r = f"EXC:{type(e).__name__}"
     else:
         fetch_r = "URL없음"
 
     # ② 파이썬 requests 세션
-    if url:
-        try:
-            data, _ct = fetch_bytes_with_browser_session(driver, url, timeout=5)
-            if data:
-                _log("[KN-DIAG] 프로필 성공(requests)")
-                return base64.b64encode(data).decode('utf-8')
-            req_r = "빈응답"
-        except Exception as e:
-            req_r = f"EXC:{type(e).__name__}"
+    if urls:
+        for url in urls:
+            try:
+                data, _ct = fetch_bytes_with_browser_session(driver, url, timeout=requests_timeout)
+                if data:
+                    _log("[KN-DIAG] 프로필 성공(requests)")
+                    return base64.b64encode(data).decode('utf-8')
+                req_r = "빈응답"
+            except Exception as e:
+                req_r = f"EXC:{type(e).__name__}"
     else:
         req_r = "URL없음"
+
+    if not capture:
+        _log(f"[KN-DIAG] 프로필 실패 | fetch={fetch_r} | requests={req_r} | capture=생략")
+        return ""
 
     # ③ 활성 아바타 요소 캡처 (네트워크 불필요)
     try:
@@ -744,26 +758,17 @@ def _stop_requested(check_stop_callback):
 
 
 def _media_prefix(post_info):
-    """게시물 정보로부터 미디어 파일명 prefix(YYMMDD_종류[_순번])를 생성합니다."""
-    import re
+    """게시물 정보로부터 미디어 파일명 prefix(YYMMDD_종류[_순번])를 생성합니다.
+
+    날짜를 못 읽으면 'unknown' 을 쓴다. PDF 쪽(kidsnote_paths)은 이때 원문을 쓰므로
+    같은 글의 PDF와 사진 이름 앞부분이 달라진다. 맞추고 싶지만, 바꾸면 이미 받아 둔
+    사진의 이름과 어긋나 '이미 받은 사진' 판단이 깨지므로 지금은 그대로 둔다.
+    """
     date_prefix = "unknown"
-    try:
-        date_str = post_info.get("date", "") or ""
-        match_dot = re.search(r'(\d{4})\.?\s*(\d{1,2})\.?\s*(\d{1,2})', date_str)
-        match_kor = re.search(r'(?:(\d{4})\s*년)?\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일', date_str)
-        current_year = datetime.date.today().year
-        if match_dot:
-            y, m, d = match_dot.groups()
-        elif match_kor:
-            y = match_kor.group(1) or current_year
-            m = match_kor.group(2)
-            d = match_kor.group(3)
-        else:
-            y, m, d = None, None, None
-        if y and m and d:
-            date_prefix = f"{str(y)[-2:]}{int(m):02d}{int(d):02d}"
-    except Exception:
-        date_prefix = "unknown"
+    ymd = paths.parse_ymd(post_info.get("date", "") or "")
+    if ymd:
+        year, month, day = ymd
+        date_prefix = "%02d%02d%02d" % (year % 100, month, day)
 
     post_index = post_info.get('post_index', 0)
     item_type = post_info.get('type', '사진')
@@ -776,22 +781,13 @@ def _post_timestamp(post_info):
     저장된 사진/PDF의 파일 시간을 게시물 날짜로 맞춰
     갤러리/탐색기에서 실제 추억 순서대로 정렬되게 한다.
     """
-    import re
-    date_str = post_info.get("date", "") or ""
-    match_dot = re.search(r'(\d{4})\.?\s*(\d{1,2})\.?\s*(\d{1,2})', date_str)
-    match_kor = re.search(r'(?:(\d{4})\s*년)?\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일', date_str)
-    try:
-        if match_dot:
-            y, m, d = match_dot.groups()
-        elif match_kor:
-            y = match_kor.group(1) or datetime.date.today().year
-            m = match_kor.group(2)
-            d = match_kor.group(3)
-        else:
-            return None
-        return datetime.datetime(int(y), int(m), int(d), 12, 0, 0).timestamp()
-    except Exception:
+    ymd = paths.parse_ymd(post_info.get("date", "") or "")
+    if not ymd:
         return None
+    try:
+        return datetime.datetime(ymd[0], ymd[1], ymd[2], 12, 0, 0).timestamp()
+    except Exception:
+        return None   # 13월 같은 있을 수 없는 날짜
 
 
 def _apply_post_timestamp(path, post_info):
@@ -839,6 +835,41 @@ def save_debug_snapshot(driver, step_name, log_func=print, mem=None):
         driver.save_screenshot(base_filename + ".png")
     except Exception as e:
         log_func(f"[DEBUG LOG] 스냅샷 저장 실패: {e}")
+
+
+# ---------------------------------------------------------------------------
+# 게시물의 신원(id)
+#
+# 이 id는 증분 백업 기록(downloaded_items.json)에 그대로 쌓이고, [새 항목만 선택]과
+# 표의 'O' 표시가 이것으로 '이미 받은 글'을 알아본다. 그래서 형식이 조금만 바뀌어도
+# 이미 받은 글 전부가 새 글로 보이게 된다. (2026-10 기준 한 사용자 PC에 1625건)
+#
+# 이 형식은 바꾸지 않는다. 날짜 표기, 제목 자르는 방식, 구분자, 주소 자리의
+# 'None' 까지 전부 계약이다. tests/memory_id_check.py 가 이것을 고정한다.
+# ---------------------------------------------------------------------------
+LIST_TITLE_LIMIT = 35
+
+
+def format_list_title(full_text):
+    """목록 카드 본문을 표에 보일 제목으로 만든다. id 의 일부이기도 하다.
+
+    35자를 넘으면 앞 35자만 남기고 '...'을 붙인다. 줄바꿈은 공백으로 바꾼다.
+    자르는 것이 먼저고 줄바꿈 바꾸기가 나중이다. 지금까지 쌓인 기록이 이 순서로
+    만들어졌으므로 그대로 지킨다.
+    """
+    text = (full_text or "").strip()
+    if len(text) > LIST_TITLE_LIMIT:
+        return text[:LIST_TITLE_LIMIT].replace('\n', ' ') + "..."
+    return text.replace('\n', ' ')
+
+
+def make_memory_id(item_type, date, title, url):
+    """게시물 하나를 가리키는 id. 형식: 유형_날짜_제목_주소
+
+    주소를 못 찾으면 그 자리에 문자열 'None' 이 들어간다. 지금까지 쌓인 기록이
+    전부 그렇게 되어 있으므로, 'None' 을 빈 문자열로 '고치면' 안 된다.
+    """
+    return f"{item_type}_{date}_{title}_{url}"
 
 
 def _scrape_list_pages(driver, item_type, memories, log,
@@ -985,31 +1016,23 @@ def _scrape_list_pages(driver, item_type, memories, log,
                     except Exception:
                         # 클래스가 바뀐 경우: 카드 텍스트에서 날짜 형태를 직접 찾는다
                         raw_date = _first_date_like_line(post) or "날짜 알 수 없음"
-                date = raw_date
-                if date != "날짜 알 수 없음" and date:
-                    import re, datetime
-                    match_dot = re.search(r'(\d{4})\.?\s*(\d{1,2})\.?\s*(\d{1,2})', date)
-                    match_kor = re.search(r'(?:(\d{4})\s*년)?\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일', date)
-                    current_year = datetime.date.today().year
-                    if match_dot:
-                        y, m, d = match_dot.groups()
-                        date = f"{y}.{int(m):02d}.{int(d):02d}"
-                    elif match_kor:
-                        y = match_kor.group(1) or current_year
-                        m = match_kor.group(2)
-                        d = match_kor.group(3)
-                        date = f"{y}.{int(m):02d}.{int(d):02d}"
+                # 'yyyy.MM.dd' 로 맞춘다. 아래 기간 거르기가 문자열 비교라 자릿수가
+                # 맞아야 하고, 이 값은 id 와 '내려받을 글 찾기'에도 그대로 쓰인다.
+                date = paths.normalize_list_date(raw_date)
                 
                 # 제목/내용 추출
                 try:
                     # 알림장의 경우 보통 본문이 제목 역할을 함
                     title_elem = post.find_element(By.XPATH, CARD_BODY_XPATH)
-                    full_text = title_elem.text.strip()
-                    title = full_text[:35].replace('\n', ' ') + "..." if len(full_text) > 35 else full_text.replace('\n', ' ')
+                    title = format_list_title(title_elem.text)
                 except NoSuchElementException:
                     try:
+                        # 예비 셀렉터로 찾았어도 제목은 같은 규칙으로 만든다.
+                        # 예전에는 여기서만 '...'도 줄바꿈 처리도 없이 잘라서, 키즈노트가
+                        # 화면을 바꿔 이쪽으로 빠지는 순간 모든 글의 id가 달라졌다.
+                        # 그러면 이미 받은 글이 전부 새 글로 보인다.
                         title_elem = post.find_element(By.CLASS_NAME, CARD_BODY_CLASS)
-                        title = title_elem.text.strip()[:35]
+                        title = format_list_title(title_elem.text)
                     except Exception:
                         # 클래스가 바뀐 경우: 카드 텍스트에서 날짜/작성자가 아닌 가장 긴 줄을 본문으로 본다
                         title = _longest_content_line(post) or "제목 알 수 없음"
@@ -1040,7 +1063,7 @@ def _scrape_list_pages(driver, item_type, memories, log,
                     log(f"DEBUG: 항목 {idx}: 빈(스켈레톤) 카드로 판단되어 제외")
                     continue
 
-                item_id = f"{item_type}_{date}_{title}_{url}"
+                item_id = make_memory_id(item_type, date, title, url)
                 if not any(m.get('id') == item_id for m in memories):
                     new_mem = {
                         'id': item_id,
@@ -1108,6 +1131,39 @@ def _scrape_list_pages(driver, item_type, memories, log,
             break
 
 
+# 이름이 보이는 아바타를 찾아 누른다. 아이 전환은 React 상태 변경이라 주소를
+# 바꾸는 것으로는 되지 않고 실제로 눌러야 한다.
+#
+# 원래 같은 스크립트가 세 군데에 있었고 돌려주는 값도 제각각이었다. 하나로 모으되,
+# '이미 선택된 아이면 누르지 않기'는 부르는 쪽이 고르게 했다. 이 판정은 화면 구조에
+# 기대는 추측이라 틀릴 수 있다. 그래서 사용자가 직접 아이를 바꾸는 곳(select_child)은
+# 지금처럼 항상 누른다. 그 경로가 '이미 선택됨'을 잘못 믿으면 다른 아이의 기록을
+# 이 아이 이름으로 저장하게 되는데, 이 프로그램에서 가장 나쁜 실패다.
+_CLICK_CHILD_JS = """
+var target = arguments[0];
+var skipIfActive = arguments[1];
+var spans = document.querySelectorAll("span[role='img']");
+for (var i = 0; i < spans.length; i++) {
+  var parent = spans[i].parentElement.parentElement;
+  if (parent && parent.innerText && parent.innerText.includes(target)) {
+    if (skipIfActive && spans[i].getAttribute('size') === '65') { return 'already'; }
+    spans[i].click();
+    return 'switched';
+  }
+}
+return 'notfound';
+"""
+
+
+def click_child(driver, child_name, skip_if_active=False):
+    """아이 아바타를 누른다. 'switched' | 'already' | 'notfound' 중 하나를 돌려준다.
+
+    skip_if_active 가 참이면, 그 아이가 이미 선택된 상태일 때 누르지 않고
+    'already' 를 돌려준다. 같은 아이로 반복 조회할 때 새로고침을 아끼려는 것이다.
+    """
+    return driver.execute_script(_CLICK_CHILD_JS, child_name, bool(skip_if_active)) or 'notfound'
+
+
 def navigate_to_memory_view(driver, item_type_label, log_func, target_child=None):
     """
     홈 화면에서부터 선택한 아이로 전환한 후 '추억보기' 메뉴를 통해 전체보기 화면으로 진입합니다.
@@ -1136,20 +1192,8 @@ def navigate_to_memory_view(driver, item_type_label, log_func, target_child=None
 
             try:
                 log_func(f"아이 전환 확인 중 (이름: {target_child})...")
-                script = """
-                    var target = arguments[0];
-                    var spans = document.querySelectorAll("span[role='img']");
-                    for(var i=0; i<spans.length; i++){
-                        var parent = spans[i].parentElement.parentElement;
-                        if(parent && parent.innerText && parent.innerText.includes(target)) {
-                            spans[i].click();
-                            return true;
-                        }
-                    }
-                    return false;
-                """
-                matched = driver.execute_script(script, target_child)
-                if not matched:
+                # 내려받기 도중 아이를 맞추는 곳이다. 예전 동작 그대로 항상 누른다.
+                if click_child(driver, target_child) == 'notfound':
                     log_func(f"[KN-DIAG] 아이 매칭 실패(이름: {target_child}) → 재진입 시도")
                 time.sleep(0.5)
                 driver.get("https://www.kidsnote.com/service")
@@ -1302,20 +1346,9 @@ def fetch_memory_list(driver, request=None, callbacks=None, result_info=None):
             log(f"아이 전환 확인 중 (이름: {child_name})...")
             # 대상 아이 아바타가 이미 활성(size=65) 상태면 'already'를 반환해
             # 클릭·리로드를 통째로 생략한다 → 같은 아이로 반복 조회 시 크게 빨라짐.
-            script = """
-                var target = arguments[0];
-                var spans = document.querySelectorAll("span[role='img']");
-                for(var i=0; i<spans.length; i++){
-                    var parent = spans[i].parentElement.parentElement;
-                    if(parent && parent.innerText && parent.innerText.includes(target)) {
-                        if(spans[i].getAttribute('size') === '65') { return 'already'; }
-                        spans[i].click();
-                        return 'switched';
-                    }
-                }
-                return 'notfound';
-            """
-            switch_result = driver.execute_script(script, child_name)
+            # (조회 직전에 GUI가 select_child 로 아이를 이미 맞춰 두므로, 이 판정이
+            #  틀리더라도 대개는 이미 맞는 아이 위에서 생략하게 된다)
+            switch_result = click_child(driver, child_name, skip_if_active=True)
             if switch_result == 'already':
                 log(f"DEBUG: '{child_name}' 이미 선택된 상태 → 전환/리로드 생략")
             else:
@@ -1602,6 +1635,160 @@ def download_as_pdf(driver, post_info, target_path, status_callback=None, check_
         log(f"PDF 저장 오류: {e}")
         return False
 
+
+# ---------------------------------------------------------------------------
+# 사진/동영상 저장
+#
+# download_photos_only 는 원래 309줄짜리 try 하나였다. 그 안에서 단계별로 떼어 낸
+# 것들이 아래에 있다. 가장 중요한 것은 select_media_urls 다. 화면에서 긁어 온 주소 중
+# 무엇을 '이 글의 사진'으로 볼지 정하는데, 여기가 틀리면 사진이 빠지거나
+# 아이 얼굴 썸네일·아이콘이 사진처럼 섞여 저장된다. 둘 다 조용히 일어난다.
+# ---------------------------------------------------------------------------
+_VIDEO_EXTS = ("mp4", "webm", "mov", "m4v", "avi", "m3u8")
+# 프로필 아바타의 썸네일 주소. 키즈노트는 아바타를 이 크기들로만 내려준다.
+_AVATAR_THUMB_RE = re.compile(r'img_(36x36|65x65|130x130|240x240)\.')
+# 주소에 이런 말이 들어 있으면 화면 장식일 가능성이 높다 (크기와 함께 판단한다)
+_UI_ASSET_TOKENS = ("profile", "avatar", "icon", "logo", "sprite")
+
+
+def select_media_urls(driver, raw_media, include_video=True):
+    """상세 화면에서 긁어 온 후보 중 실제로 저장할 사진/동영상 주소만 순서대로 고른다.
+
+    raw_media 는 화면의 img/video/source/배경이미지에서 모은 항목 목록이다.
+    각 항목: url, kind(image/srcset/image-link/video/source/background),
+             w·h(원본 크기), dw·dh(화면에 표시된 크기)
+
+    빼는 것:
+      - 동영상 (include_video 가 거짓일 때)
+      - .svg (아이콘)
+      - 화면에 90px 이하로 작게 표시된 것. 앨범 사진 격자는 보통 150px 이상이다.
+      - 아바타 썸네일 주소 (img_36x36 등)
+      - 주소에 profile/avatar/icon 같은 말이 있으면서 작거나 크기를 모르는 것
+      - 이미 고른 것과 같은 주소
+    """
+    media_srcs = []
+    seen_srcs = set()
+    for item in raw_media or []:
+        raw_url = item.get("url", "")
+        if item.get("kind") == "srcset":
+            raw_url = _best_url_from_srcset(raw_url)
+        src = normalize_media_url(driver, raw_url)
+        if not src:
+            continue
+
+        lower_src = src.lower()
+        path_only = lower_src.split("?")[0]
+        if not include_video:
+            if item.get("kind") in ("video", "source"):
+                continue
+            if any(path_only.endswith("." + ext) for ext in _VIDEO_EXTS):
+                continue
+
+        width = int(item.get("w") or 0)
+        height = int(item.get("h") or 0)
+        disp = max(int(item.get("dw") or 0), int(item.get("dh") or 0))
+        is_tiny_ui_asset = 0 < max(width, height) <= 96
+        looks_like_ui_asset = any(token in lower_src for token in _UI_ASSET_TOKENS)
+        # 프로필 아바타 제외: (1) 아바타 썸네일 URL 패턴 — 강한 신호,
+        # (2) 화면에 아주 작게(<=90px) 표시되는 이미지
+        is_small_display = 0 < disp <= 90
+        is_avatar_thumb = bool(_AVATAR_THUMB_RE.search(path_only))
+        if (
+            lower_src.endswith(".svg")
+            or is_small_display
+            or is_avatar_thumb
+            or (looks_like_ui_asset and is_tiny_ui_asset)
+            or (looks_like_ui_asset and width == 0 and height == 0)
+        ):
+            continue
+        if src in seen_srcs:
+            continue
+        seen_srcs.add(src)
+        media_srcs.append(src)
+    return media_srcs
+
+
+def _save_media_bytes(target_dir, prefix_str, number, ext, data, post_info):
+    """받은 바이트를 '{접두사}_{번호}.{확장자}' 로 저장하고 파일 시각을 글 날짜로 맞춘다."""
+    file_path = os.path.join(target_dir, f"{prefix_str}_{number}.{ext}")
+    with open(file_path, "wb") as f:
+        f.write(data)
+    _apply_post_timestamp(file_path, post_info)
+    return file_path
+
+
+def _download_one_media(driver, session, src, target_dir, prefix_str, number, post_info,
+                        prefer_browser_fetch, check_stop_callback):
+    """사진/동영상 하나를 받는다. 막히면 다음 방법으로 넘어간다.
+
+    1차 파이썬 직접 받기 → 2차 CDP(개발자 도구 통로) → 3차 브라우저 fetch.
+    사내망 프록시가 파이썬은 막고 브라우저는 열어 두는 경우가 많아서 이렇게 계단을 둔다.
+
+    돌려주는 값: (방법, 실패사유)
+      방법은 'direct' / 'cdp' / 'browser' 중 하나, 모두 실패면 None,
+      중간에 사용자가 중지를 누르면 'stopped'.
+    """
+    fail_status = ""
+
+    # 1차: 파이썬 직접 다운로드 (차단 확인된 환경이면 시도 자체를 생략해 시간 절약)
+    if not prefer_browser_fetch:
+        file_path = tmp_path = None
+        try:
+            headers = {"Referer": driver.current_url or "https://www.kidsnote.com/"}
+            response = _session_get(session, src, headers=headers, timeout=(10, 30), stream=True, allow_redirects=True)
+            response.raise_for_status()
+            content_type = response.headers.get("content-type", "")
+            if "text/html" in content_type.lower():
+                raise ValueError("media request returned an HTML page")
+            ext = _extension_from_response(src, content_type)
+
+            file_path = os.path.join(target_dir, f"{prefix_str}_{number}.{ext}")
+            tmp_path = file_path + ".part"
+            wrote_any = False
+            with open(tmp_path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=1024 * 256):
+                    if _stop_requested(check_stop_callback):
+                        raise InterruptedError("download stopped")
+                    if chunk:
+                        wrote_any = True
+                        f.write(chunk)
+            if not wrote_any:
+                raise ValueError("empty media response")
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            os.replace(tmp_path, file_path)
+            _apply_post_timestamp(file_path, post_info)
+            return 'direct', ""
+        except Exception as req_e:
+            fail_status = f"direct:{type(req_e).__name__}"
+            try:
+                if tmp_path and os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            if _stop_requested(check_stop_callback):
+                return 'stopped', fail_status
+
+    # 2차: CDP 경유 — fetch()와 달리 CORS 제약을 받지 않아, CDN이 CORS 헤더를 아예
+    # 안 내려주는 경우(= 3차 browser fetch도 항상 실패하는 근본 원인)의 진짜 대안이 된다.
+    # 3차: 브라우저 fetch() 경유 — CDN이 CORS를 정상 지원하는 환경에서 유효하다.
+    for method, fetch in (('cdp', lambda: _cdp_fetch_media(driver, src)),
+                          ('browser', lambda: _browser_fetch_media(driver, src))):
+        media_bytes, status = fetch()
+        if _stop_requested(check_stop_callback):
+            return 'stopped', fail_status
+        if not media_bytes:
+            fail_status += f" {method}:{status}"
+            continue
+        try:
+            _save_media_bytes(target_dir, prefix_str, number,
+                              _extension_from_response(src, ""), media_bytes, post_info)
+            return method, fail_status
+        except Exception as write_e:
+            fail_status += f" {method}:write_{type(write_e).__name__}"
+    return None, fail_status
+
+
 def download_photos_only(driver, post_info, target_dir, status_callback=None, check_stop_callback=None, include_video=True, prefer_browser_fetch=False):
     """
     Downloads only images from the currently open post detail page.
@@ -1689,45 +1876,8 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
             return items;
         """)
 
-        media_srcs = []
-        seen_srcs = set()
-        for item in raw_media or []:
-            raw_url = item.get("url", "")
-            if item.get("kind") == "srcset":
-                raw_url = _best_url_from_srcset(raw_url)
-            src = normalize_media_url(driver, raw_url)
-            if not src:
-                continue
-
-            lower_src = src.lower()
-            if not include_video:
-                if item.get("kind") in ("video", "source"):
-                    continue
-                path_part = lower_src.split("?")[0]
-                if any(path_part.endswith("." + ext) for ext in ("mp4", "webm", "mov", "m4v", "avi", "m3u8")):
-                    continue
-            width = int(item.get("w") or 0)
-            height = int(item.get("h") or 0)
-            disp = max(int(item.get("dw") or 0), int(item.get("dh") or 0))
-            path_only = lower_src.split("?")[0]
-            is_tiny_ui_asset = 0 < max(width, height) <= 96
-            looks_like_ui_asset = any(token in lower_src for token in ["profile", "avatar", "icon", "logo", "sprite"])
-            # 프로필 아바타 제외: (1) 아바타 썸네일 URL 패턴(img_36x36/65x65/130x130/240x240) — 강한 신호,
-            # (2) 화면에 아주 작게(<=90px, 앨범 썸네일 그리드는 보통 150px+이므로 안전) 표시되는 이미지
-            is_small_display = 0 < disp <= 90
-            is_avatar_thumb = bool(re.search(r'img_(36x36|65x65|130x130|240x240)\.', path_only))
-            if (
-                lower_src.endswith(".svg")
-                or is_small_display
-                or is_avatar_thumb
-                or (looks_like_ui_asset and is_tiny_ui_asset)
-                or (looks_like_ui_asset and width == 0 and height == 0)
-            ):
-                continue
-            if src in seen_srcs:
-                continue
-            seen_srcs.add(src)
-            media_srcs.append(src)
+        # 화면에서 모은 후보 중 이 글의 사진/동영상만 고른다 (아바타·아이콘 제외)
+        media_srcs = select_media_urls(driver, raw_media, include_video)
 
         # 화면에 렌더링된 '크게 표시되는' 이미지 요소 목록 (URL 다운로드가 전부 막히면 캡처 폴백)
         # 표시 크기(offsetWidth) 기준으로 걸러 프로필 아바타 같은 작은 이미지는 제외한다.
@@ -1738,7 +1888,7 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
                     disp_w = int(_img.get_attribute("offsetWidth") or 0)
                     nat_w = int(_img.get_attribute("naturalWidth") or 0)
                     src_attr = (_img.get_attribute("src") or "").lower().split("?")[0]
-                    if re.search(r'img_(36x36|65x65|130x130|240x240)\.', src_attr):
+                    if _AVATAR_THUMB_RE.search(src_attr):
                         continue  # 아바타 썸네일 제외
                     if disp_w >= 200 and nat_w >= 200:
                         large_img_elements.append(_img)
@@ -1759,99 +1909,24 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
                 log("다운로드가 중지되었습니다.")
                 return False
             log(f"미디어 다운로드 중 ({idx+1}/{len(media_srcs)})...")
-            saved = False
-            fail_status = ""
 
-            # 1차: 파이썬 직접 다운로드 (차단 확인된 환경이면 시도 자체를 생략해 시간 절약)
-            if not prefer_browser_fetch:
-                try:
-                    headers = {"Referer": driver.current_url or "https://www.kidsnote.com/"}
-                    response = _session_get(session, src, headers=headers, timeout=(10, 30), stream=True, allow_redirects=True)
-                    response.raise_for_status()
-                    content_type = response.headers.get("content-type", "")
-                    if "text/html" in content_type.lower():
-                        raise ValueError("media request returned an HTML page")
-                    ext = _extension_from_response(src, content_type)
+            method, fail_status = _download_one_media(
+                driver, session, src, target_dir, prefix_str, count + 1, post_info,
+                prefer_browser_fetch, check_stop_callback)
+            if method == 'stopped':
+                log("다운로드가 중지되었습니다.")
+                return False
+            if method:
+                count += 1
+                cdp_fallback_used = cdp_fallback_used or method == 'cdp'
+                browser_fallback_used = browser_fallback_used or method == 'browser'
+                continue
 
-                    file_path = os.path.join(target_dir, f"{prefix_str}_{count+1}.{ext}")
-                    tmp_path = file_path + ".part"
-                    wrote_any = False
-                    with open(tmp_path, "wb") as f:
-                        for chunk in response.iter_content(chunk_size=1024 * 256):
-                            if _stop_requested(check_stop_callback):
-                                raise InterruptedError("download stopped")
-                            if chunk:
-                                wrote_any = True
-                                f.write(chunk)
-                    if not wrote_any:
-                        raise ValueError("empty media response")
-                    if os.path.exists(file_path):
-                        os.remove(file_path)
-                    os.replace(tmp_path, file_path)
-                    _apply_post_timestamp(file_path, post_info)
-                    count += 1
-                    saved = True
-                except Exception as req_e:
-                    fail_status = f"direct:{type(req_e).__name__}"
-                    try:
-                        if 'tmp_path' in locals() and os.path.exists(tmp_path):
-                            os.remove(tmp_path)
-                    except Exception:
-                        pass
-                    if _stop_requested(check_stop_callback):
-                        log("다운로드가 중지되었습니다.")
-                        return False
-
-            # 2차: CDP(DevTools Protocol) 경유 다운로드 — fetch()와 달리 CORS 제약을 받지 않아
-            # CDN이 CORS 헤더를 아예 안 내려주는 경우(= 3차 browser fetch도 항상 실패하는 근본 원인)의
-            # 진짜 대안이 된다.
-            if not saved:
-                media_bytes, status = _cdp_fetch_media(driver, src)
-                if _stop_requested(check_stop_callback):
-                    log("다운로드가 중지되었습니다.")
-                    return False
-                if media_bytes:
-                    try:
-                        ext = _extension_from_response(src, "")
-                        file_path = os.path.join(target_dir, f"{prefix_str}_{count+1}.{ext}")
-                        with open(file_path, "wb") as f:
-                            f.write(media_bytes)
-                        _apply_post_timestamp(file_path, post_info)
-                        count += 1
-                        saved = True
-                        cdp_fallback_used = True
-                    except Exception as write_e:
-                        fail_status += f" cdp:write_{type(write_e).__name__}"
-                else:
-                    fail_status += f" cdp:{status}"
-
-            # 3차: 브라우저 fetch() 경유 다운로드 — CDN이 CORS를 정상 지원하는 환경에서 유효
-            if not saved:
-                media_bytes, status = _browser_fetch_media(driver, src)
-                if _stop_requested(check_stop_callback):
-                    log("다운로드가 중지되었습니다.")
-                    return False
-                if media_bytes:
-                    try:
-                        ext = _extension_from_response(src, "")
-                        file_path = os.path.join(target_dir, f"{prefix_str}_{count+1}.{ext}")
-                        with open(file_path, "wb") as f:
-                            f.write(media_bytes)
-                        _apply_post_timestamp(file_path, post_info)
-                        count += 1
-                        saved = True
-                        browser_fallback_used = True
-                    except Exception as write_e:
-                        fail_status += f" browser:write_{type(write_e).__name__}"
-                else:
-                    fail_status += f" browser:{status}"
-
-            if not saved:
-                failed_count += 1
-                reason = fail_status.strip()
-                if reason:
-                    fail_reasons.append(reason)
-                log(f"DEBUG: 미디어 다운로드 실패 ({reason})")
+            failed_count += 1
+            reason = fail_status.strip()
+            if reason:
+                fail_reasons.append(reason)
+            log(f"DEBUG: 미디어 다운로드 실패 ({reason})")
 
         # 4차(최후): 직접·CDP·브라우저 fetch가 모두 막힌 경우(프록시가 이미지 CDN 완전 차단 등)
         # 화면에 이미 보이는 이미지를 캡처해서라도 저장한다. 화질은 표시 해상도 수준.
@@ -1872,10 +1947,8 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
                 if not shot:
                     continue
                 try:
-                    file_path = os.path.join(target_dir, f"{prefix_str}_{count+1}.png")
-                    with open(file_path, "wb") as f:
-                        f.write(base64.b64decode(shot))
-                    _apply_post_timestamp(file_path, post_info)
+                    _save_media_bytes(target_dir, prefix_str, count + 1, "png",
+                                      base64.b64decode(shot), post_info)
                     count += 1
                     capture_fallback_used = True
                 except Exception:
@@ -1911,6 +1984,58 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
     except Exception as e:
         log(f"사진/동영상 다운로드 오류: {e}")
         return False
+
+
+# ---------------------------------------------------------------------------
+# 다운로드 단계별 소요 측정
+#
+# 한 글을 받는 데 고정 대기만 PDF 약 10초, 사진 약 6초가 들어간다. 그런데 이 대기들은
+# 목록 진입 때와 달리 '아무 일도 안 하는 대기'가 아니다. 예를 들어 글을 누른 뒤의
+# 2초를 빼면, 사진 저장 쪽이 방금 떠난 목록 화면의 썸네일을 그 글의 사진으로 알고
+# 저장할 수 있다. 그래서 줄이기 전에 어디서 시간이 가는지부터 잰다.
+#
+# 특히 '글 찾기'를 본다. 주소가 없는 글(지금까지 전부)은 목록으로 돌아가 날짜+제목으로
+# 찾는데, 못 찾으면 홈부터 다시 들어가 그 페이지까지 넘긴다. 이게 자주 일어나면
+# 고정 대기보다 이쪽이 훨씬 크다.
+#
+# 처음 몇 건은 한 줄씩, 끝나면 요약 한 줄을 [KN-DIAG] 로 남긴다 (진단정보 복사에 담긴다).
+# ---------------------------------------------------------------------------
+_DL_DETAIL_ITEMS = 3
+_dl_stats = {}
+
+
+def begin_download_stats():
+    """다운로드 한 번을 시작할 때 부른다. 측정값을 비운다."""
+    _dl_stats.clear()
+    _dl_stats.update({"items": 0, "find": 0.0, "open": 0.0, "save": 0.0, "back": 0.0,
+                      "how": {}})
+
+
+def _record_download_timing(how, find, open_, save, back, log):
+    if not _dl_stats:
+        begin_download_stats()
+    _dl_stats["items"] += 1
+    _dl_stats["find"] += find
+    _dl_stats["open"] += open_
+    _dl_stats["save"] += save
+    _dl_stats["back"] += back
+    _dl_stats["how"][how] = _dl_stats["how"].get(how, 0) + 1
+    if _dl_stats["items"] <= _DL_DETAIL_ITEMS:
+        log("[KN-DIAG] 소요 다운로드 #%d: 찾기 %.1f초(%s) | 열기 %.1f초 | 저장 %.1f초 | 목록복귀 %.1f초"
+            % (_dl_stats["items"], find, how, open_, save, back))
+
+
+def end_download_stats():
+    """다운로드 한 번이 끝나면 부른다. 요약 한 줄(없으면 빈 문자열)을 돌려준다."""
+    n = _dl_stats.get("items", 0)
+    if not n:
+        return ""
+    how = ", ".join("%s %d" % (k, v) for k, v in sorted(_dl_stats["how"].items(), key=lambda x: -x[1]))
+    return ("[KN-DIAG] 소요 다운로드 요약 | %d건 | 평균 찾기 %.1f초(%s) | 열기 %.1f초 | "
+            "저장 %.1f초 | 목록복귀 %.1f초"
+            % (n, _dl_stats["find"] / n, how, _dl_stats["open"] / n,
+               _dl_stats["save"] / n, _dl_stats["back"] / n))
+
 
 def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None, is_overwrite_allow=True, check_stop_callback=None, include_video=True, prefer_browser_fetch=False):
     """
@@ -1967,27 +2092,15 @@ def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None,
                     try: raw_date = post.find_element(By.XPATH, CARD_DATE_XPATH).text.strip()
                     except Exception: raw_date = post.find_element(By.CLASS_NAME, CARD_DATE_CLASS).find_element(By.TAG_NAME, "span").text.strip()
                     
-                    d = raw_date
-                    if d and d != "날짜 알 수 없음":
-                        import datetime, re
-                        match_dot = re.search(r'(\d{4})\.?\s*(\d{1,2})\.?\s*(\d{1,2})', d)
-                        match_kor = re.search(r'(?:(\d{4})\s*년)?\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일', d)
-                        current_year = datetime.date.today().year
-                        if match_dot:
-                            y, m, day = match_dot.groups()
-                            d = f"{y}.{int(m):02d}.{int(day):02d}"
-                        elif match_kor:
-                            y = match_kor.group(1) or current_year
-                            m = match_kor.group(2)
-                            day = match_kor.group(3)
-                            d = f"{y}.{int(m):02d}.{int(day):02d}"
-                    
+                    # 목록에서 이 글을 수집할 때와 똑같은 방식으로 날짜와 제목을 만든다.
+                    # 주소를 못 찾은 글(지금까지 전부 그랬다)은 날짜+제목이 같은지로만
+                    # 알아보므로, 여기서 한 글자라도 다르게 만들면 내려받을 글을 못 찾는다.
+                    d = paths.normalize_list_date(raw_date)
                     try:
-                        full_text = post.find_element(By.XPATH, CARD_BODY_XPATH).text.strip()
-                        t = full_text[:35].replace('\n', ' ') + "..." if len(full_text) > 35 else full_text.replace('\n', ' ')
+                        t = format_list_title(post.find_element(By.XPATH, CARD_BODY_XPATH).text)
                     except Exception:
                         try:
-                            t = post.find_element(By.CLASS_NAME, CARD_BODY_CLASS).text.strip()[:35]
+                            t = format_list_title(post.find_element(By.CLASS_NAME, CARD_BODY_CLASS).text)
                         except Exception:
                             t = ""
 
@@ -2007,10 +2120,12 @@ def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None,
             return None
 
         # 1. Check if it's already on the screen (e.g. from a previous driver.back())
+        _t0 = time.time()
         if _stop_requested(check_stop_callback):
             log("다운로드가 중지되었습니다.")
             return False
         found_post = _find_target()
+        found_how = "바로"
 
         # 2. Check if it's on the next screen (for consecutive downloads crossing page boundaries)
         if not found_post:
@@ -2030,7 +2145,9 @@ def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None,
                             break
                     if found_next:
                         found_post = _find_target()
-                        if found_post: break
+                        if found_post:
+                            found_how = "다음 페이지"
+                            break
                     else:
                         break
             except Exception:
@@ -2082,25 +2199,36 @@ def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None,
                 log("목록 항목을 로드하는 데 시간이 초과되었습니다.")
 
             found_post = _find_target()
-        
+            found_how = "재진입"
+
         if found_post:
             if _stop_requested(check_stop_callback):
                 log("다운로드가 중지되었습니다.")
                 return False
+            _t_found = time.time()
             driver.execute_script("arguments[0].click();", found_post)
+            # 이 2초는 지우면 안 된다. 사진 저장 쪽은 '이미지가 보이면 준비됨'으로 판단하는데,
+            # 상세 화면으로 바뀌기 전에는 목록의 썸네일이 그대로 보여서 그것을 이 글의
+            # 사진으로 알고 저장할 수 있다. 줄이려면 '상세 화면으로 바뀌었다'는 조건이 필요하다.
             if _sleep_with_stop(2, check_stop_callback):  # 상세 페이지 완전 로딩 대기 (댓글 로드를 위해 2초로 연장)
                 log("다운로드가 중지되었습니다.")
                 return False
             save_debug_snapshot(driver, f"Opened_{mem['type']}_Detail", status_callback, mem=mem)
-            
+            _t_open = time.time()
+
             if is_pdf:
                 res = download_as_pdf(driver, mem, target_path_or_dir, status_callback, check_stop_callback)
             else:
                 res = download_photos_only(driver, mem, target_path_or_dir, status_callback, check_stop_callback, include_video, prefer_browser_fetch)
-            
+            _t_saved = time.time()
+
             # 다운로드 완료 후 뒤로가기를 호출하여 리스트 상태로 복귀!! (이것이 속도의 핵심)
+            # 1.5초도 함부로 줄이지 않는다. 목록이 다 그려지기 전에 다음 글을 찾으면 못 찾고,
+            # 그러면 홈부터 다시 들어가는 훨씬 느린 길로 빠진다.
             driver.back()
             time.sleep(1.5)
+            _record_download_timing(found_how, _t_found - _t0, _t_open - _t_found,
+                                    _t_saved - _t_open, time.time() - _t_saved, log)
             return res
         else:
             log("해당 위치에 게시물이 존재하지 않습니다. (날짜/제목 불일치)")
@@ -2225,30 +2353,6 @@ def _profile_url_candidates(driver, primary_url, fallback_url):
     return candidates[:3]
 
 
-def _fetch_profile_bytes(driver, candidates, timeout=12):
-    """후보 주소를 순서대로 시도해 얼굴 사진을 base64로 받아 온다.
-
-    브라우저 fetch를 먼저 쓴다. 사내망 프록시도 브라우저 네트워크는 대개 열려 있고
-    원본 화질을 그대로 받을 수 있기 때문이다. 안 되면 파이썬 requests 세션으로 넘어간다.
-    """
-    for url in candidates:
-        try:
-            data, _status = _browser_fetch_media(driver, url, timeout=timeout)
-            if data:
-                return base64.b64encode(data).decode('utf-8')
-        except Exception:
-            continue
-
-    for url in candidates:
-        try:
-            data, _ct = fetch_bytes_with_browser_session(driver, url, timeout=3)
-            if data:
-                return base64.b64encode(data).decode('utf-8')
-        except Exception:
-            continue
-    return ""
-
-
 def fetch_children(driver, status_callback=None, progress_callback=None,
                    log_callback=None, max_image_failures=2):
     """로그인한 계정의 아이 목록을 얼굴 사진과 함께 읽어 온다.
@@ -2357,8 +2461,11 @@ def fetch_children(driver, status_callback=None, progress_callback=None,
 
         img_b64 = None
         if url and failure_streak < max_image_failures:
-            img_b64 = _fetch_profile_bytes(
-                driver, _profile_url_candidates(driver, url, orig_url)) or None
+            # 화면 캡처는 위에서 이미 해 두었으므로 여기서는 하지 않는다.
+            # 진단 줄도 아래에서 아이별로 따로 남기므로 log 는 넘기지 않는다.
+            img_b64 = get_profile_image_b64(
+                driver, _profile_url_candidates(driver, url, orig_url),
+                log=None, browser_timeout=12, requests_timeout=3, capture=False) or None
             failure_streak = 0 if img_b64 else failure_streak + 1
 
         # 원본을 못 받았으면 화면 캡처본으로 대신한다
@@ -2382,22 +2489,6 @@ def fetch_children(driver, status_callback=None, progress_callback=None,
     return children
 
 
-# 이름이 보이는 아바타를 찾아 클릭한다. 아이 전환은 React 상태 변경이라
-# 주소를 바꾸는 것으로는 되지 않고 실제로 눌러야 한다.
-_SELECT_CHILD_JS = """
-var target = arguments[0];
-var spans = document.querySelectorAll("span[role='img']");
-for (var i = 0; i < spans.length; i++) {
-  var parent = spans[i].parentElement.parentElement;
-  if (parent && parent.innerText && parent.innerText.includes(target)) {
-    spans[i].click();
-    return true;
-  }
-}
-return false;
-"""
-
-
 def select_child(driver, child_name, status_callback=None):
     """아이 목록에서 해당 아이를 눌러 활성 계정을 바꾼다.
 
@@ -2414,8 +2505,9 @@ def select_child(driver, child_name, status_callback=None):
         driver.get("https://www.kidsnote.com/service")
         time.sleep(1.5)
 
-    clicked = bool(driver.execute_script(_SELECT_CHILD_JS, child_name))
-    if not clicked:
+    # 사용자가 직접 고른 아이로 바꾸는 곳이라 '이미 선택됨' 판정을 믿지 않고 항상 누른다.
+    # (click_child 의 설명 참고)
+    if click_child(driver, child_name) == 'notfound':
         log("DEBUG: 아이 목록에서 해당 이름을 찾지 못했습니다.")
         return False
 
