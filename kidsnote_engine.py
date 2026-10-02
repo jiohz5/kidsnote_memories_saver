@@ -1635,6 +1635,160 @@ def download_as_pdf(driver, post_info, target_path, status_callback=None, check_
         log(f"PDF 저장 오류: {e}")
         return False
 
+
+# ---------------------------------------------------------------------------
+# 사진/동영상 저장
+#
+# download_photos_only 는 원래 309줄짜리 try 하나였다. 그 안에서 단계별로 떼어 낸
+# 것들이 아래에 있다. 가장 중요한 것은 select_media_urls 다. 화면에서 긁어 온 주소 중
+# 무엇을 '이 글의 사진'으로 볼지 정하는데, 여기가 틀리면 사진이 빠지거나
+# 아이 얼굴 썸네일·아이콘이 사진처럼 섞여 저장된다. 둘 다 조용히 일어난다.
+# ---------------------------------------------------------------------------
+_VIDEO_EXTS = ("mp4", "webm", "mov", "m4v", "avi", "m3u8")
+# 프로필 아바타의 썸네일 주소. 키즈노트는 아바타를 이 크기들로만 내려준다.
+_AVATAR_THUMB_RE = re.compile(r'img_(36x36|65x65|130x130|240x240)\.')
+# 주소에 이런 말이 들어 있으면 화면 장식일 가능성이 높다 (크기와 함께 판단한다)
+_UI_ASSET_TOKENS = ("profile", "avatar", "icon", "logo", "sprite")
+
+
+def select_media_urls(driver, raw_media, include_video=True):
+    """상세 화면에서 긁어 온 후보 중 실제로 저장할 사진/동영상 주소만 순서대로 고른다.
+
+    raw_media 는 화면의 img/video/source/배경이미지에서 모은 항목 목록이다.
+    각 항목: url, kind(image/srcset/image-link/video/source/background),
+             w·h(원본 크기), dw·dh(화면에 표시된 크기)
+
+    빼는 것:
+      - 동영상 (include_video 가 거짓일 때)
+      - .svg (아이콘)
+      - 화면에 90px 이하로 작게 표시된 것. 앨범 사진 격자는 보통 150px 이상이다.
+      - 아바타 썸네일 주소 (img_36x36 등)
+      - 주소에 profile/avatar/icon 같은 말이 있으면서 작거나 크기를 모르는 것
+      - 이미 고른 것과 같은 주소
+    """
+    media_srcs = []
+    seen_srcs = set()
+    for item in raw_media or []:
+        raw_url = item.get("url", "")
+        if item.get("kind") == "srcset":
+            raw_url = _best_url_from_srcset(raw_url)
+        src = normalize_media_url(driver, raw_url)
+        if not src:
+            continue
+
+        lower_src = src.lower()
+        path_only = lower_src.split("?")[0]
+        if not include_video:
+            if item.get("kind") in ("video", "source"):
+                continue
+            if any(path_only.endswith("." + ext) for ext in _VIDEO_EXTS):
+                continue
+
+        width = int(item.get("w") or 0)
+        height = int(item.get("h") or 0)
+        disp = max(int(item.get("dw") or 0), int(item.get("dh") or 0))
+        is_tiny_ui_asset = 0 < max(width, height) <= 96
+        looks_like_ui_asset = any(token in lower_src for token in _UI_ASSET_TOKENS)
+        # 프로필 아바타 제외: (1) 아바타 썸네일 URL 패턴 — 강한 신호,
+        # (2) 화면에 아주 작게(<=90px) 표시되는 이미지
+        is_small_display = 0 < disp <= 90
+        is_avatar_thumb = bool(_AVATAR_THUMB_RE.search(path_only))
+        if (
+            lower_src.endswith(".svg")
+            or is_small_display
+            or is_avatar_thumb
+            or (looks_like_ui_asset and is_tiny_ui_asset)
+            or (looks_like_ui_asset and width == 0 and height == 0)
+        ):
+            continue
+        if src in seen_srcs:
+            continue
+        seen_srcs.add(src)
+        media_srcs.append(src)
+    return media_srcs
+
+
+def _save_media_bytes(target_dir, prefix_str, number, ext, data, post_info):
+    """받은 바이트를 '{접두사}_{번호}.{확장자}' 로 저장하고 파일 시각을 글 날짜로 맞춘다."""
+    file_path = os.path.join(target_dir, f"{prefix_str}_{number}.{ext}")
+    with open(file_path, "wb") as f:
+        f.write(data)
+    _apply_post_timestamp(file_path, post_info)
+    return file_path
+
+
+def _download_one_media(driver, session, src, target_dir, prefix_str, number, post_info,
+                        prefer_browser_fetch, check_stop_callback):
+    """사진/동영상 하나를 받는다. 막히면 다음 방법으로 넘어간다.
+
+    1차 파이썬 직접 받기 → 2차 CDP(개발자 도구 통로) → 3차 브라우저 fetch.
+    사내망 프록시가 파이썬은 막고 브라우저는 열어 두는 경우가 많아서 이렇게 계단을 둔다.
+
+    돌려주는 값: (방법, 실패사유)
+      방법은 'direct' / 'cdp' / 'browser' 중 하나, 모두 실패면 None,
+      중간에 사용자가 중지를 누르면 'stopped'.
+    """
+    fail_status = ""
+
+    # 1차: 파이썬 직접 다운로드 (차단 확인된 환경이면 시도 자체를 생략해 시간 절약)
+    if not prefer_browser_fetch:
+        file_path = tmp_path = None
+        try:
+            headers = {"Referer": driver.current_url or "https://www.kidsnote.com/"}
+            response = _session_get(session, src, headers=headers, timeout=(10, 30), stream=True, allow_redirects=True)
+            response.raise_for_status()
+            content_type = response.headers.get("content-type", "")
+            if "text/html" in content_type.lower():
+                raise ValueError("media request returned an HTML page")
+            ext = _extension_from_response(src, content_type)
+
+            file_path = os.path.join(target_dir, f"{prefix_str}_{number}.{ext}")
+            tmp_path = file_path + ".part"
+            wrote_any = False
+            with open(tmp_path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=1024 * 256):
+                    if _stop_requested(check_stop_callback):
+                        raise InterruptedError("download stopped")
+                    if chunk:
+                        wrote_any = True
+                        f.write(chunk)
+            if not wrote_any:
+                raise ValueError("empty media response")
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            os.replace(tmp_path, file_path)
+            _apply_post_timestamp(file_path, post_info)
+            return 'direct', ""
+        except Exception as req_e:
+            fail_status = f"direct:{type(req_e).__name__}"
+            try:
+                if tmp_path and os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            if _stop_requested(check_stop_callback):
+                return 'stopped', fail_status
+
+    # 2차: CDP 경유 — fetch()와 달리 CORS 제약을 받지 않아, CDN이 CORS 헤더를 아예
+    # 안 내려주는 경우(= 3차 browser fetch도 항상 실패하는 근본 원인)의 진짜 대안이 된다.
+    # 3차: 브라우저 fetch() 경유 — CDN이 CORS를 정상 지원하는 환경에서 유효하다.
+    for method, fetch in (('cdp', lambda: _cdp_fetch_media(driver, src)),
+                          ('browser', lambda: _browser_fetch_media(driver, src))):
+        media_bytes, status = fetch()
+        if _stop_requested(check_stop_callback):
+            return 'stopped', fail_status
+        if not media_bytes:
+            fail_status += f" {method}:{status}"
+            continue
+        try:
+            _save_media_bytes(target_dir, prefix_str, number,
+                              _extension_from_response(src, ""), media_bytes, post_info)
+            return method, fail_status
+        except Exception as write_e:
+            fail_status += f" {method}:write_{type(write_e).__name__}"
+    return None, fail_status
+
+
 def download_photos_only(driver, post_info, target_dir, status_callback=None, check_stop_callback=None, include_video=True, prefer_browser_fetch=False):
     """
     Downloads only images from the currently open post detail page.
@@ -1722,45 +1876,8 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
             return items;
         """)
 
-        media_srcs = []
-        seen_srcs = set()
-        for item in raw_media or []:
-            raw_url = item.get("url", "")
-            if item.get("kind") == "srcset":
-                raw_url = _best_url_from_srcset(raw_url)
-            src = normalize_media_url(driver, raw_url)
-            if not src:
-                continue
-
-            lower_src = src.lower()
-            if not include_video:
-                if item.get("kind") in ("video", "source"):
-                    continue
-                path_part = lower_src.split("?")[0]
-                if any(path_part.endswith("." + ext) for ext in ("mp4", "webm", "mov", "m4v", "avi", "m3u8")):
-                    continue
-            width = int(item.get("w") or 0)
-            height = int(item.get("h") or 0)
-            disp = max(int(item.get("dw") or 0), int(item.get("dh") or 0))
-            path_only = lower_src.split("?")[0]
-            is_tiny_ui_asset = 0 < max(width, height) <= 96
-            looks_like_ui_asset = any(token in lower_src for token in ["profile", "avatar", "icon", "logo", "sprite"])
-            # 프로필 아바타 제외: (1) 아바타 썸네일 URL 패턴(img_36x36/65x65/130x130/240x240) — 강한 신호,
-            # (2) 화면에 아주 작게(<=90px, 앨범 썸네일 그리드는 보통 150px+이므로 안전) 표시되는 이미지
-            is_small_display = 0 < disp <= 90
-            is_avatar_thumb = bool(re.search(r'img_(36x36|65x65|130x130|240x240)\.', path_only))
-            if (
-                lower_src.endswith(".svg")
-                or is_small_display
-                or is_avatar_thumb
-                or (looks_like_ui_asset and is_tiny_ui_asset)
-                or (looks_like_ui_asset and width == 0 and height == 0)
-            ):
-                continue
-            if src in seen_srcs:
-                continue
-            seen_srcs.add(src)
-            media_srcs.append(src)
+        # 화면에서 모은 후보 중 이 글의 사진/동영상만 고른다 (아바타·아이콘 제외)
+        media_srcs = select_media_urls(driver, raw_media, include_video)
 
         # 화면에 렌더링된 '크게 표시되는' 이미지 요소 목록 (URL 다운로드가 전부 막히면 캡처 폴백)
         # 표시 크기(offsetWidth) 기준으로 걸러 프로필 아바타 같은 작은 이미지는 제외한다.
@@ -1771,7 +1888,7 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
                     disp_w = int(_img.get_attribute("offsetWidth") or 0)
                     nat_w = int(_img.get_attribute("naturalWidth") or 0)
                     src_attr = (_img.get_attribute("src") or "").lower().split("?")[0]
-                    if re.search(r'img_(36x36|65x65|130x130|240x240)\.', src_attr):
+                    if _AVATAR_THUMB_RE.search(src_attr):
                         continue  # 아바타 썸네일 제외
                     if disp_w >= 200 and nat_w >= 200:
                         large_img_elements.append(_img)
@@ -1792,99 +1909,24 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
                 log("다운로드가 중지되었습니다.")
                 return False
             log(f"미디어 다운로드 중 ({idx+1}/{len(media_srcs)})...")
-            saved = False
-            fail_status = ""
 
-            # 1차: 파이썬 직접 다운로드 (차단 확인된 환경이면 시도 자체를 생략해 시간 절약)
-            if not prefer_browser_fetch:
-                try:
-                    headers = {"Referer": driver.current_url or "https://www.kidsnote.com/"}
-                    response = _session_get(session, src, headers=headers, timeout=(10, 30), stream=True, allow_redirects=True)
-                    response.raise_for_status()
-                    content_type = response.headers.get("content-type", "")
-                    if "text/html" in content_type.lower():
-                        raise ValueError("media request returned an HTML page")
-                    ext = _extension_from_response(src, content_type)
+            method, fail_status = _download_one_media(
+                driver, session, src, target_dir, prefix_str, count + 1, post_info,
+                prefer_browser_fetch, check_stop_callback)
+            if method == 'stopped':
+                log("다운로드가 중지되었습니다.")
+                return False
+            if method:
+                count += 1
+                cdp_fallback_used = cdp_fallback_used or method == 'cdp'
+                browser_fallback_used = browser_fallback_used or method == 'browser'
+                continue
 
-                    file_path = os.path.join(target_dir, f"{prefix_str}_{count+1}.{ext}")
-                    tmp_path = file_path + ".part"
-                    wrote_any = False
-                    with open(tmp_path, "wb") as f:
-                        for chunk in response.iter_content(chunk_size=1024 * 256):
-                            if _stop_requested(check_stop_callback):
-                                raise InterruptedError("download stopped")
-                            if chunk:
-                                wrote_any = True
-                                f.write(chunk)
-                    if not wrote_any:
-                        raise ValueError("empty media response")
-                    if os.path.exists(file_path):
-                        os.remove(file_path)
-                    os.replace(tmp_path, file_path)
-                    _apply_post_timestamp(file_path, post_info)
-                    count += 1
-                    saved = True
-                except Exception as req_e:
-                    fail_status = f"direct:{type(req_e).__name__}"
-                    try:
-                        if 'tmp_path' in locals() and os.path.exists(tmp_path):
-                            os.remove(tmp_path)
-                    except Exception:
-                        pass
-                    if _stop_requested(check_stop_callback):
-                        log("다운로드가 중지되었습니다.")
-                        return False
-
-            # 2차: CDP(DevTools Protocol) 경유 다운로드 — fetch()와 달리 CORS 제약을 받지 않아
-            # CDN이 CORS 헤더를 아예 안 내려주는 경우(= 3차 browser fetch도 항상 실패하는 근본 원인)의
-            # 진짜 대안이 된다.
-            if not saved:
-                media_bytes, status = _cdp_fetch_media(driver, src)
-                if _stop_requested(check_stop_callback):
-                    log("다운로드가 중지되었습니다.")
-                    return False
-                if media_bytes:
-                    try:
-                        ext = _extension_from_response(src, "")
-                        file_path = os.path.join(target_dir, f"{prefix_str}_{count+1}.{ext}")
-                        with open(file_path, "wb") as f:
-                            f.write(media_bytes)
-                        _apply_post_timestamp(file_path, post_info)
-                        count += 1
-                        saved = True
-                        cdp_fallback_used = True
-                    except Exception as write_e:
-                        fail_status += f" cdp:write_{type(write_e).__name__}"
-                else:
-                    fail_status += f" cdp:{status}"
-
-            # 3차: 브라우저 fetch() 경유 다운로드 — CDN이 CORS를 정상 지원하는 환경에서 유효
-            if not saved:
-                media_bytes, status = _browser_fetch_media(driver, src)
-                if _stop_requested(check_stop_callback):
-                    log("다운로드가 중지되었습니다.")
-                    return False
-                if media_bytes:
-                    try:
-                        ext = _extension_from_response(src, "")
-                        file_path = os.path.join(target_dir, f"{prefix_str}_{count+1}.{ext}")
-                        with open(file_path, "wb") as f:
-                            f.write(media_bytes)
-                        _apply_post_timestamp(file_path, post_info)
-                        count += 1
-                        saved = True
-                        browser_fallback_used = True
-                    except Exception as write_e:
-                        fail_status += f" browser:write_{type(write_e).__name__}"
-                else:
-                    fail_status += f" browser:{status}"
-
-            if not saved:
-                failed_count += 1
-                reason = fail_status.strip()
-                if reason:
-                    fail_reasons.append(reason)
-                log(f"DEBUG: 미디어 다운로드 실패 ({reason})")
+            failed_count += 1
+            reason = fail_status.strip()
+            if reason:
+                fail_reasons.append(reason)
+            log(f"DEBUG: 미디어 다운로드 실패 ({reason})")
 
         # 4차(최후): 직접·CDP·브라우저 fetch가 모두 막힌 경우(프록시가 이미지 CDN 완전 차단 등)
         # 화면에 이미 보이는 이미지를 캡처해서라도 저장한다. 화질은 표시 해상도 수준.
@@ -1905,10 +1947,8 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
                 if not shot:
                     continue
                 try:
-                    file_path = os.path.join(target_dir, f"{prefix_str}_{count+1}.png")
-                    with open(file_path, "wb") as f:
-                        f.write(base64.b64decode(shot))
-                    _apply_post_timestamp(file_path, post_info)
+                    _save_media_bytes(target_dir, prefix_str, count + 1, "png",
+                                      base64.b64decode(shot), post_info)
                     count += 1
                     capture_fallback_used = True
                 except Exception:
