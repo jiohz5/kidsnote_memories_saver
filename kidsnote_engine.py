@@ -194,23 +194,17 @@ CARD_DATE_XPATH = ".//div[contains(@class, 'exa4ze65')]/div"   # 카드 안 날�
 CARD_DATE_CLASS = "css-15xrcbi"                      # 날짜 폴백
 CARD_BODY_XPATH = ".//div[contains(@class, 'e14iqn2g4')]"      # 카드 안 본문/제목
 CARD_BODY_CLASS = "css-12g7lcb"                      # 본문 폴백
-MEMORY_MENU_CLASS = "e1q0zrbj0"                      # 사이드바 '추억보기'
-MEMORY_MENU_LINK_CLASS = "e1efjxmz8"                 # 드롭다운 '추억보기'
 ALBUM_BODY_CLASS = "css-1469k6q"                     # 앨범 상세 본문 영역
 
+# 목록에는 주소(SECTION_URLS)로 바로 들어간다. 예전에 쓰던 '추억보기' 메뉴와
+# '전체보기' 버튼 셀렉터는 그 클릭이 실제로는 아무 일도 하지 않는 것으로 밝혀져 지웠다.
 # 여러 곳에서 쓰는 것들. 키즈노트가 화면을 바꾸면 여기부터 확인한다.
 # (예전에는 같은 XPath가 세 군데에 흩어져 있어, 한 곳만 고치고 넘어가기 쉬웠다)
-VIEW_ALL_XPATH = "//*[contains(text(),'전체보기')]"                    # 목록 '전체보기' 버튼
 NEXT_PAGE_XPATH = "//button[.//span[starts-with(text(), '다음')]]"     # 다음 페이지 버튼
-SIDEBAR_MENU_XPATH = "//*[@data-testid='center-sidebar-menu-select']"  # 사이드바 메뉴
 ACTIVE_AVATAR_XPATH = "//*[@size='65' and @role='img']"                # 선택된 아이의 큰 아바타
 ANY_AVATAR_CSS = "span[role='img']"                                    # 아바타 아무거나(화면 준비 확인용)
 CHILD_AVATAR_CSS = "span[role='img'][size='36']"                       # 아이 목록의 작은 아바타(선택용)
 ACTIVE_AVATAR_CSS = "span[role='img'][size='65']"                      # 선택된 아이의 큰 아바타
-
-# 사이드바의 '추억보기'. 접힌 화면에서는 아래쪽(드롭다운) 것을 눌러야 한다.
-MEMORY_MENU_XPATH = "//*[contains(@class,'%s') and contains(.,'추억보기')]" % MEMORY_MENU_CLASS
-MEMORY_MENU_LINK_XPATH = "//*[contains(@class,'%s') and contains(.,'추억보기')]" % MEMORY_MENU_LINK_CLASS
 
 
 def post_card_xpath():
