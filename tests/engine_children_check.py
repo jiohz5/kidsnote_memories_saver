@@ -76,14 +76,20 @@ check("빈 주소도 예외 없이", m.upgrade_thumbnail_url(''), '')
 check("None도 예외 없이", m.upgrade_thumbnail_url(None), None)
 
 # ------------------------------------------------- 실제 브라우저가 필요한 검사
+# 브라우저를 못 띄우면 건너뛰되, 결과 줄에 반드시 드러나게 한다.
+# 예전에는 건너뛰고도 'ALL PASSED' 를 찍어서, Edge가 업데이트되어 드라이버와
+# 버전이 어긋난 동안 이 검사가 아무것도 안 했는데도 통과로 보였다.
+skipped_reason = None
 try:
     driver = make_driver()
+    if driver is None:
+        skipped_reason = "msedgedriver.exe 없음"
 except Exception as e:
-    print("\n[건너뜀] Edge를 띄우지 못해 브라우저 검사는 생략합니다: %s" % type(e).__name__)
+    skipped_reason = "Edge를 띄우지 못함(%s) - Edge와 드라이버 버전을 확인하세요" % type(e).__name__
     driver = None
 
 if driver is None:
-    print("\n[건너뜀] msedgedriver.exe 가 없어 브라우저 검사는 생략합니다.")
+    print("\n[건너뜀] 브라우저 검사: %s" % skipped_reason)
 else:
     try:
         print("\n== 아이 목록 읽기 (가짜 페이지) ==")
@@ -104,21 +110,46 @@ else:
         check("이름 목록은 빈 목록", driver.execute_script(m._CHILD_NAMES_JS), [])
         check("얼굴 사진 주소는 빈 문자열", driver.execute_script(m._ACTIVE_AVATAR_URL_JS), "")
 
-        print("\n== 아이 전환 ==")
-        driver.get("data:text/html;charset=utf-8," + FAKE_PAGE)
-        # 클릭되었는지 표시가 남도록 심어 둔다
-        driver.execute_script("""
+        # 어느 아바타가 눌렸는지 기록이 남도록 심어 둔다 (문서 순서 번호)
+        MARK_CLICKS = """
             window.__clicked = null;
-            document.querySelectorAll("span[role='img'][size='36']").forEach(function (s, i) {
+            document.querySelectorAll("span[role='img']").forEach(function (s, i) {
               s.addEventListener('click', function () { window.__clicked = i; });
             });
-        """)
-        found = driver.execute_script(m._SELECT_CHILD_JS, '홍길순')
-        check("두 번째 아이를 찾아 누름", bool(found), True)
-        check("실제로 눌린 것은 두 번째", driver.execute_script("return window.__clicked;"), 1)
+        """
 
-        found = driver.execute_script(m._SELECT_CHILD_JS, '없는아이')
-        check("목록에 없는 이름은 False", bool(found), False)
+        print("\n== 아이 전환 ==")
+        driver.get("data:text/html;charset=utf-8," + FAKE_PAGE)
+        driver.execute_script(MARK_CLICKS)
+        check("두 번째 아이를 찾아 누름", m.click_child(driver, '홍길순'), 'switched')
+        check("실제로 눌린 것은 두 번째", driver.execute_script("return window.__clicked;"), 1)
+        check("목록에 없는 이름은 notfound", m.click_child(driver, '없는아이'), 'notfound')
+
+        print("\n== '이미 선택된 아이' 판정 ==")
+        # 첫째 아이가 이미 선택되어(큰 아바타, size=65) 있는 화면
+        ACTIVE_PAGE = """
+        <html><body>
+          <div><div><span role="img" size="65"></span></div>
+               <div><p>홍길동</p><p>21.3.15.</p></div></div>
+          <div><div><span role="img" size="36"></span></div>
+               <div><p>홍길순</p><p>23.7.1.</p></div></div>
+        </body></html>
+        """
+        driver.get("data:text/html;charset=utf-8," + ACTIVE_PAGE)
+        driver.execute_script(MARK_CLICKS)
+        check("반복 조회용: 이미 선택된 아이는 누르지 않음",
+              m.click_child(driver, '홍길동', skip_if_active=True), 'already')
+        check("  -> 실제로 아무것도 눌리지 않음",
+              driver.execute_script("return window.__clicked;"), None)
+
+        # 사용자가 직접 아이를 바꾸는 곳은 판정을 믿지 않고 항상 누른다.
+        # 판정이 틀리면 다른 아이의 기록을 이 아이 이름으로 저장하게 되기 때문이다.
+        check("직접 전환용: 이미 선택돼 있어도 누름",
+              m.click_child(driver, '홍길동'), 'switched')
+        check("  -> 실제로 눌림", driver.execute_script("return window.__clicked;"), 0)
+
+        check("선택 안 된 아이는 반복 조회용이어도 누름",
+              m.click_child(driver, '홍길순', skip_if_active=True), 'switched')
     finally:
         try:
             driver.quit()
@@ -129,4 +160,7 @@ print()
 if fails:
     print("RESULT: %d FAIL: %s" % (len(fails), fails))
     sys.exit(1)
+if skipped_reason:
+    print("RESULT: SKIPPED - 브라우저 검사를 하지 못함 (%s)" % skipped_reason)
+    sys.exit(2)
 print("RESULT: ALL PASSED")

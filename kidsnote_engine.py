@@ -615,45 +615,62 @@ def _element_screenshot_b64(element, log=None):
         return ""
 
 
-def get_profile_image_b64(driver, url, log=None):
+def get_profile_image_b64(driver, urls, log=None, browser_timeout=15,
+                          requests_timeout=5, capture=True):
     """프로필(아이 얼굴) 이미지를 가장 견고한 방법으로 확보해 base64 반환.
 
     순서: ① 브라우저 fetch(원본 화질, 사내망에서도 브라우저 네트워크는 대개 열림)
          ② 파이썬 requests 세션
          ③ 화면의 활성 아바타 요소 캡처(무엇도 안 될 때 최후, 표시 해상도)
     모두 실패하면 [KN-DIAG] 태그로 세 방법의 사유를 한 줄에 남긴다(사용자 복사용).
+
+    urls 는 주소 하나이거나 주소 목록이다. 목록이면 ①을 전부 시도한 뒤 ②로 넘어간다.
+    (같은 사진도 해상도별로 주소가 따로 있어 어느 것이 살아 있는지 받아 봐야 안다)
+
+    예전에는 같은 일을 하는 _fetch_profile_bytes 가 따로 있었다. 차이는 주소 목록,
+    대기 시간, ③을 하느냐뿐이어서 인자로 합쳤다. 아이 목록을 읽을 때(fetch_children)는
+    화면 캡처를 미리 따로 해 두므로 capture=False 로 부른다.
     """
     def _log(msg):
         if log:
             log(msg)
 
+    if isinstance(urls, str) or urls is None:
+        urls = [urls] if urls else []
+
     fetch_r = req_r = shot_r = "미시도"
 
     # ① 브라우저 컨텍스트 fetch
-    if url:
-        try:
-            data, status = _browser_fetch_media(driver, url, timeout=15)
-            if data:
-                _log("[KN-DIAG] 프로필 성공(브라우저fetch)")
-                return base64.b64encode(data).decode('utf-8')
-            fetch_r = status
-        except Exception as e:
-            fetch_r = f"EXC:{type(e).__name__}"
+    if urls:
+        for url in urls:
+            try:
+                data, status = _browser_fetch_media(driver, url, timeout=browser_timeout)
+                if data:
+                    _log("[KN-DIAG] 프로필 성공(브라우저fetch)")
+                    return base64.b64encode(data).decode('utf-8')
+                fetch_r = status
+            except Exception as e:
+                fetch_r = f"EXC:{type(e).__name__}"
     else:
         fetch_r = "URL없음"
 
     # ② 파이썬 requests 세션
-    if url:
-        try:
-            data, _ct = fetch_bytes_with_browser_session(driver, url, timeout=5)
-            if data:
-                _log("[KN-DIAG] 프로필 성공(requests)")
-                return base64.b64encode(data).decode('utf-8')
-            req_r = "빈응답"
-        except Exception as e:
-            req_r = f"EXC:{type(e).__name__}"
+    if urls:
+        for url in urls:
+            try:
+                data, _ct = fetch_bytes_with_browser_session(driver, url, timeout=requests_timeout)
+                if data:
+                    _log("[KN-DIAG] 프로필 성공(requests)")
+                    return base64.b64encode(data).decode('utf-8')
+                req_r = "빈응답"
+            except Exception as e:
+                req_r = f"EXC:{type(e).__name__}"
     else:
         req_r = "URL없음"
+
+    if not capture:
+        _log(f"[KN-DIAG] 프로필 실패 | fetch={fetch_r} | requests={req_r} | capture=생략")
+        return ""
 
     # ③ 활성 아바타 요소 캡처 (네트워크 불필요)
     try:
@@ -1114,6 +1131,39 @@ def _scrape_list_pages(driver, item_type, memories, log,
             break
 
 
+# 이름이 보이는 아바타를 찾아 누른다. 아이 전환은 React 상태 변경이라 주소를
+# 바꾸는 것으로는 되지 않고 실제로 눌러야 한다.
+#
+# 원래 같은 스크립트가 세 군데에 있었고 돌려주는 값도 제각각이었다. 하나로 모으되,
+# '이미 선택된 아이면 누르지 않기'는 부르는 쪽이 고르게 했다. 이 판정은 화면 구조에
+# 기대는 추측이라 틀릴 수 있다. 그래서 사용자가 직접 아이를 바꾸는 곳(select_child)은
+# 지금처럼 항상 누른다. 그 경로가 '이미 선택됨'을 잘못 믿으면 다른 아이의 기록을
+# 이 아이 이름으로 저장하게 되는데, 이 프로그램에서 가장 나쁜 실패다.
+_CLICK_CHILD_JS = """
+var target = arguments[0];
+var skipIfActive = arguments[1];
+var spans = document.querySelectorAll("span[role='img']");
+for (var i = 0; i < spans.length; i++) {
+  var parent = spans[i].parentElement.parentElement;
+  if (parent && parent.innerText && parent.innerText.includes(target)) {
+    if (skipIfActive && spans[i].getAttribute('size') === '65') { return 'already'; }
+    spans[i].click();
+    return 'switched';
+  }
+}
+return 'notfound';
+"""
+
+
+def click_child(driver, child_name, skip_if_active=False):
+    """아이 아바타를 누른다. 'switched' | 'already' | 'notfound' 중 하나를 돌려준다.
+
+    skip_if_active 가 참이면, 그 아이가 이미 선택된 상태일 때 누르지 않고
+    'already' 를 돌려준다. 같은 아이로 반복 조회할 때 새로고침을 아끼려는 것이다.
+    """
+    return driver.execute_script(_CLICK_CHILD_JS, child_name, bool(skip_if_active)) or 'notfound'
+
+
 def navigate_to_memory_view(driver, item_type_label, log_func, target_child=None):
     """
     홈 화면에서부터 선택한 아이로 전환한 후 '추억보기' 메뉴를 통해 전체보기 화면으로 진입합니다.
@@ -1142,20 +1192,8 @@ def navigate_to_memory_view(driver, item_type_label, log_func, target_child=None
 
             try:
                 log_func(f"아이 전환 확인 중 (이름: {target_child})...")
-                script = """
-                    var target = arguments[0];
-                    var spans = document.querySelectorAll("span[role='img']");
-                    for(var i=0; i<spans.length; i++){
-                        var parent = spans[i].parentElement.parentElement;
-                        if(parent && parent.innerText && parent.innerText.includes(target)) {
-                            spans[i].click();
-                            return true;
-                        }
-                    }
-                    return false;
-                """
-                matched = driver.execute_script(script, target_child)
-                if not matched:
+                # 내려받기 도중 아이를 맞추는 곳이다. 예전 동작 그대로 항상 누른다.
+                if click_child(driver, target_child) == 'notfound':
                     log_func(f"[KN-DIAG] 아이 매칭 실패(이름: {target_child}) → 재진입 시도")
                 time.sleep(0.5)
                 driver.get("https://www.kidsnote.com/service")
@@ -1308,20 +1346,9 @@ def fetch_memory_list(driver, request=None, callbacks=None, result_info=None):
             log(f"아이 전환 확인 중 (이름: {child_name})...")
             # 대상 아이 아바타가 이미 활성(size=65) 상태면 'already'를 반환해
             # 클릭·리로드를 통째로 생략한다 → 같은 아이로 반복 조회 시 크게 빨라짐.
-            script = """
-                var target = arguments[0];
-                var spans = document.querySelectorAll("span[role='img']");
-                for(var i=0; i<spans.length; i++){
-                    var parent = spans[i].parentElement.parentElement;
-                    if(parent && parent.innerText && parent.innerText.includes(target)) {
-                        if(spans[i].getAttribute('size') === '65') { return 'already'; }
-                        spans[i].click();
-                        return 'switched';
-                    }
-                }
-                return 'notfound';
-            """
-            switch_result = driver.execute_script(script, child_name)
+            # (조회 직전에 GUI가 select_child 로 아이를 이미 맞춰 두므로, 이 판정이
+            #  틀리더라도 대개는 이미 맞는 아이 위에서 생략하게 된다)
+            switch_result = click_child(driver, child_name, skip_if_active=True)
             if switch_result == 'already':
                 log(f"DEBUG: '{child_name}' 이미 선택된 상태 → 전환/리로드 생략")
             else:
@@ -2219,30 +2246,6 @@ def _profile_url_candidates(driver, primary_url, fallback_url):
     return candidates[:3]
 
 
-def _fetch_profile_bytes(driver, candidates, timeout=12):
-    """후보 주소를 순서대로 시도해 얼굴 사진을 base64로 받아 온다.
-
-    브라우저 fetch를 먼저 쓴다. 사내망 프록시도 브라우저 네트워크는 대개 열려 있고
-    원본 화질을 그대로 받을 수 있기 때문이다. 안 되면 파이썬 requests 세션으로 넘어간다.
-    """
-    for url in candidates:
-        try:
-            data, _status = _browser_fetch_media(driver, url, timeout=timeout)
-            if data:
-                return base64.b64encode(data).decode('utf-8')
-        except Exception:
-            continue
-
-    for url in candidates:
-        try:
-            data, _ct = fetch_bytes_with_browser_session(driver, url, timeout=3)
-            if data:
-                return base64.b64encode(data).decode('utf-8')
-        except Exception:
-            continue
-    return ""
-
-
 def fetch_children(driver, status_callback=None, progress_callback=None,
                    log_callback=None, max_image_failures=2):
     """로그인한 계정의 아이 목록을 얼굴 사진과 함께 읽어 온다.
@@ -2351,8 +2354,11 @@ def fetch_children(driver, status_callback=None, progress_callback=None,
 
         img_b64 = None
         if url and failure_streak < max_image_failures:
-            img_b64 = _fetch_profile_bytes(
-                driver, _profile_url_candidates(driver, url, orig_url)) or None
+            # 화면 캡처는 위에서 이미 해 두었으므로 여기서는 하지 않는다.
+            # 진단 줄도 아래에서 아이별로 따로 남기므로 log 는 넘기지 않는다.
+            img_b64 = get_profile_image_b64(
+                driver, _profile_url_candidates(driver, url, orig_url),
+                log=None, browser_timeout=12, requests_timeout=3, capture=False) or None
             failure_streak = 0 if img_b64 else failure_streak + 1
 
         # 원본을 못 받았으면 화면 캡처본으로 대신한다
@@ -2376,22 +2382,6 @@ def fetch_children(driver, status_callback=None, progress_callback=None,
     return children
 
 
-# 이름이 보이는 아바타를 찾아 클릭한다. 아이 전환은 React 상태 변경이라
-# 주소를 바꾸는 것으로는 되지 않고 실제로 눌러야 한다.
-_SELECT_CHILD_JS = """
-var target = arguments[0];
-var spans = document.querySelectorAll("span[role='img']");
-for (var i = 0; i < spans.length; i++) {
-  var parent = spans[i].parentElement.parentElement;
-  if (parent && parent.innerText && parent.innerText.includes(target)) {
-    spans[i].click();
-    return true;
-  }
-}
-return false;
-"""
-
-
 def select_child(driver, child_name, status_callback=None):
     """아이 목록에서 해당 아이를 눌러 활성 계정을 바꾼다.
 
@@ -2408,8 +2398,9 @@ def select_child(driver, child_name, status_callback=None):
         driver.get("https://www.kidsnote.com/service")
         time.sleep(1.5)
 
-    clicked = bool(driver.execute_script(_SELECT_CHILD_JS, child_name))
-    if not clicked:
+    # 사용자가 직접 고른 아이로 바꾸는 곳이라 '이미 선택됨' 판정을 믿지 않고 항상 누른다.
+    # (click_child 의 설명 참고)
+    if click_child(driver, child_name) == 'notfound':
         log("DEBUG: 아이 목록에서 해당 이름을 찾지 못했습니다.")
         return False
 
