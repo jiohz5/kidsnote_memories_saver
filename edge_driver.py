@@ -369,3 +369,100 @@ def python_dll_dir():
     실행할 때 DLL 로드 실패로 죽는다. 빌드 스크립트가 이 경로를 PATH에 넣는다.
     """
     return os.path.join(sys.base_prefix, "Library", "bin")
+
+
+# ---------------------------------------------------------------------------
+# 이 프로그램이 띄운 드라이버만 정리하기
+#
+# 예전에는 'taskkill /im msedgedriver.exe' 로 이름이 같은 프로세스를 전부 죽였다.
+# 그러면 같은 PC에서 돌던 다른 자동화 프로그램(실제로 사용자 PC에서 다른 폴더의
+# msedgedriver 가 함께 돌고 있었다)의 브라우저까지 끊긴다. 키즈노트 세이버를 두 개
+# 띄워 하나를 닫아도 나머지 하나의 다운로드가 끊긴다.
+# 이제는 이 프로세스의 '자식'인 것만 골라 정리한다.
+# ---------------------------------------------------------------------------
+OWN_HELPER_NAMES = ("msedgedriver.exe", "selenium-manager.exe")
+
+
+def _child_processes(parent_pid):
+    """parent_pid 가 띄운 프로세스들의 (pid, 실행파일 이름) 목록. 윈도우가 아니면 빈 목록."""
+    if os.name != "nt":
+        return []
+    import ctypes
+    from ctypes import wintypes
+
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD),
+                    ("cntUsage", wintypes.DWORD),
+                    ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_size_t),
+                    ("th32ModuleID", wintypes.DWORD),
+                    ("cntThreads", wintypes.DWORD),
+                    ("th32ParentProcessID", wintypes.DWORD),
+                    ("pcPriClassBase", ctypes.c_long),
+                    ("dwFlags", wintypes.DWORD),
+                    ("szExeFile", ctypes.c_wchar * 260)]
+
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x2, 0)   # TH32CS_SNAPPROCESS
+    if not snapshot or snapshot == wintypes.HANDLE(-1).value:
+        return []
+    found = []
+    try:
+        entry = PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+        ok = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while ok:
+            if entry.th32ParentProcessID == parent_pid:
+                found.append((entry.th32ProcessID, entry.szExeFile))
+            ok = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snapshot)
+
+    # 부모 번호는 부모가 끝난 뒤에도 그대로 남는다. 예전에 같은 번호를 쓰던 다른
+    # 프로그램이 남긴 고아 프로세스를 내 자식으로 착각하지 않도록, 나보다 먼저
+    # 생긴 것은 뺀다 (자식은 언제나 부모보다 뒤에 생긴다).
+    parent_born = _process_birth(parent_pid)
+    if parent_born is None:
+        return found
+    return [(pid, name) for pid, name in found
+            if (_process_birth(pid) or 0) >= parent_born]
+
+
+def _process_birth(pid):
+    """프로세스가 생긴 시각 (윈도우 FILETIME 값). 알 수 없으면 None."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.windll.kernel32
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    handle = kernel32.OpenProcess(0x1000, False, pid)   # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return None
+    try:
+        times = [wintypes.FILETIME() for _ in range(4)]   # 생성 / 종료 / 커널 / 사용자
+        if not kernel32.GetProcessTimes(handle, *[ctypes.byref(t) for t in times]):
+            return None
+        born = times[0]
+        return (born.dwHighDateTime << 32) | born.dwLowDateTime
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def kill_own_driver_processes():
+    """이 프로그램이 띄운 msedgedriver / selenium-manager 만 (딸린 브라우저째로) 정리한다.
+
+    '지금 이 프로세스의 자식'인지로만 고른다. 예전에 기억해 둔 PID 를 쓰지 않는 것은,
+    그 프로세스가 이미 끝났고 같은 번호를 다른 프로그램이 다시 받았을 수 있어서다.
+    돌려주는 값은 정리를 시도한 PID 목록.
+    """
+    targets = [pid for pid, name in _child_processes(os.getpid())
+               if name.lower() in OWN_HELPER_NAMES]
+    for pid in targets:
+        try:
+            # /t: 그 드라이버가 띄운 브라우저 창까지 함께 정리한다
+            subprocess.run(["taskkill", "/f", "/t", "/pid", str(pid)], shell=False, timeout=5,
+                           capture_output=True, creationflags=_NO_WINDOW)
+        except Exception:
+            pass
+    return targets

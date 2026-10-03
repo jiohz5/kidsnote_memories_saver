@@ -120,6 +120,84 @@ if os.path.exists(real):
 else:
     print("   [건너뜀] msedgedriver.exe 가 없습니다")
 
+print("\n== 이 프로그램이 띄운 드라이버만 정리 ==")
+# 같은 PC에서 다른 자동화 프로그램의 msedgedriver 가 함께 돌 수 있다 (실제로 겪음).
+# 창을 닫을 때 이름으로 전부 죽이면 그 프로그램의 브라우저까지 끊긴다.
+# 여기서는 내 자식 드라이버 하나와, 다른 프로그램이 띄운 셈인 드라이버 하나를 띄워 본다.
+# 남의 드라이버는 이 검사가 직접 띄운 것만 쓰고, 끝나면 그 번호로만 정리한다.
+if os.name == "nt" and os.path.exists(real):
+    import ctypes
+    import subprocess
+
+    def alive(pid):
+        k32 = ctypes.windll.kernel32
+        handle = k32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            k32.GetExitCodeProcess(handle, ctypes.byref(code))
+            return code.value == 259   # STILL_ACTIVE
+        finally:
+            k32.CloseHandle(handle)
+
+    def is_my_child(pid, parent=None):
+        return any(p == pid for p, _n in ed._child_processes(parent or os.getpid()))
+
+    mine = subprocess.Popen([real, "--port=0"], stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, creationflags=0x08000000)
+    # 다른 프로그램 흉내: 따로 띄운 파이썬이 드라이버를 띄우고 계속 살아 있다
+    other = subprocess.Popen(
+        [sys.executable, "-c",
+         "import subprocess, sys, time\n"
+         "p = subprocess.Popen([sys.argv[1], '--port=0'], stdout=subprocess.DEVNULL,"
+         " stderr=subprocess.DEVNULL, creationflags=0x08000000)\n"
+         "print(p.pid, flush=True)\n"
+         "time.sleep(60)\n", real],
+        stdout=subprocess.PIPE, text=True, creationflags=0x08000000)
+    try:
+        foreign_pid = int(other.stdout.readline().strip())
+        check("내 드라이버는 내 자식으로 보임", is_my_child(mine.pid), True)
+        check("남의 드라이버는 내 자식이 아님", is_my_child(foreign_pid), False)
+
+        killed = ed.kill_own_driver_processes()
+        check("내 드라이버를 정리 대상에 넣음", mine.pid in killed, True)
+        check("남의 드라이버는 정리 대상에 없음", foreign_pid in killed, False)
+        try:
+            mine.wait(timeout=5)
+            mine_gone = True
+        except subprocess.TimeoutExpired:
+            mine_gone = False
+        check("내 드라이버는 꺼짐", mine_gone, True)
+        check("남의 드라이버는 살아 있음", alive(foreign_pid), True)
+    finally:
+        if mine.poll() is None:
+            mine.kill()
+        # 이 검사가 띄운 파이썬과 그 아래 드라이버만, 번호로 정리한다
+        subprocess.run(["taskkill", "/f", "/t", "/pid", str(other.pid)], capture_output=True,
+                       creationflags=0x08000000)
+        other.wait(timeout=10)
+
+    # 부모 번호는 부모가 끝나도 남는다. 예전에 같은 번호를 쓰던 프로그램의 고아 프로세스를
+    # 내 자식으로 착각하지 않도록, 나보다 먼저 생긴 것은 빼야 한다.
+    probe = subprocess.Popen([real, "--port=0"], stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, creationflags=0x08000000)
+    saved_birth = ed._process_birth
+    try:
+        me = os.getpid()
+        check("생긴 시각: 자식이 나보다 뒤", ed._process_birth(probe.pid) >= ed._process_birth(me),
+              True)
+        check("  -> 그래서 자식으로 보임", is_my_child(probe.pid), True)
+        ed._process_birth = lambda pid: 200 if pid == me else 100   # 자식이 더 먼저 생긴 척
+        check("  -> 나보다 먼저 생긴 것은 자식으로 치지 않음", is_my_child(probe.pid), False)
+        check("  -> 정리 대상에도 없음", probe.pid in ed.kill_own_driver_processes(), False)
+    finally:
+        ed._process_birth = saved_birth
+        probe.kill()
+        probe.wait(timeout=5)
+else:
+    print("   [건너뜀] 윈도우가 아니거나 msedgedriver.exe 가 없습니다")
+
 print()
 if fails:
     print("RESULT: %d FAIL: %s" % (len(fails), fails))

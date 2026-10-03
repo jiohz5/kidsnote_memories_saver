@@ -1416,8 +1416,7 @@ class KidsnoteApp(QtWidgets.QWidget):
                         pass
                     self.driver = None
                 try:
-                    import subprocess
-                    subprocess.run(["taskkill", "/f", "/t", "/im", "msedgedriver.exe"], shell=False, creationflags=0x08000000)
+                    edge_driver.kill_own_driver_processes()
                 except Exception:
                     pass
                 return
@@ -2509,12 +2508,12 @@ class KidsnoteApp(QtWidgets.QWidget):
         t.start()
         t.join(timeout=5.0)
 
+        # quit()이 끝내지 못한 드라이버가 남아 있으면 정리한다. 이 프로그램이 띄운 것만 —
+        # 이름으로 전부 죽이면 같은 PC에서 돌던 다른 자동화 프로그램의 브라우저까지 끊긴다.
+        # Selenium Manager 폴백으로 실행된 경우 selenium-manager.exe가 MEI 임시폴더 안에서
+        # 돌고 있을 수 있음 → 살아있으면 PyInstaller 임시폴더 삭제 실패 경고의 원인이 됨
         try:
-            import subprocess
-            subprocess.run(["taskkill", "/f", "/t", "/im", "msedgedriver.exe"], shell=False, timeout=5, creationflags=0x08000000)
-            # Selenium Manager 폴백으로 실행된 경우 selenium-manager.exe가 MEI 임시폴더 안에서
-            # 돌고 있을 수 있음 → 살아있으면 PyInstaller 임시폴더 삭제 실패 경고의 원인이 됨
-            subprocess.run(["taskkill", "/f", "/t", "/im", "selenium-manager.exe"], shell=False, timeout=5, creationflags=0x08000000)
+            edge_driver.kill_own_driver_processes()
         except Exception:
             pass
 
