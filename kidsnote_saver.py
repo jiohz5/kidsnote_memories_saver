@@ -26,6 +26,11 @@ _fault_log_file = None
 
 
 def _app_log_dir():
+    # 테스트는 KIDSNOTE_LOG_DIR 로 따로 쓴다. 그러지 않으면 테스트가 만든 가짜 다운로드
+    # 기록과 [KN-DIAG] 줄이 사용자의 진짜 로그에 섞여, 진단정보 복사에까지 딸려 간다.
+    override = os.environ.get("KIDSNOTE_LOG_DIR")
+    if override:
+        return override
     base_dir = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
     return os.path.join(base_dir, "KidsnoteMemoriesSaver", "logs")
 
