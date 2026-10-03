@@ -35,8 +35,11 @@ import kidsnote_saver as ks  # noqa: E402
 
 PERIOD = "최근 3개월"
 PER_TYPE = 10
-LOGIN_TIMEOUT = int(os.environ.get("LIVE_LOGIN_TIMEOUT", 20 * 60))   # 로그인을 기다리는 최대 시간(초)
-TOTAL_TIMEOUT = 75 * 60      # 전체 최대 시간
+# 로그인을 기다리는 최대 시간(초). 사람이 자리를 비울 수 있어 넉넉하게 둔다.
+LOGIN_TIMEOUT = int(os.environ.get("LIVE_LOGIN_TIMEOUT", 12 * 60 * 60))
+# 로그인한 뒤 목록·다운로드에 쓸 수 있는 최대 시간(초).
+# 시작 시각부터 세면 로그인을 오래 기다린 만큼 측정 시간이 줄어 다운로드 도중에 끊긴다.
+RUN_TIMEOUT = int(os.environ.get("LIVE_RUN_TIMEOUT", 60 * 60))
 
 OUT_DIR = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.join(ROOT, "_live_test")
 REPORT = os.path.abspath(sys.argv[2]) if len(sys.argv) > 2 else os.path.join(OUT_DIR, "report.json")
@@ -168,8 +171,8 @@ def tick():
 
 def _tick():
     now = time.time()
-    if now - STARTED > TOTAL_TIMEOUT:
-        finish("전체 시간 초과", {"last_step": state["step"]})
+    if state.get("login_at") and now - state["login_at"] > RUN_TIMEOUT:
+        finish("로그인 뒤 시간 초과", {"last_step": state["step"]})
         return
 
     step = state["step"]
@@ -181,7 +184,7 @@ def _tick():
                  and w.load_btn.isEnabled() and w.child_combo.isEnabled())
         if ready:
             note("로그인 완료. 아이 %d명" % len(w.children_data))
-            state.update(step="settle", since=now)
+            state.update(step="settle", since=now, login_at=now)
         return
 
     if step == "settle":
