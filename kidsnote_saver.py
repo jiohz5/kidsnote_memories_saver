@@ -379,11 +379,11 @@ class DownloadThread(QtCore.QThread):
             except OSError:
                 pass
             self.elapsed_sec = int(time.time() - started_at)
-            summary = manager.end_download_stats()
-            if summary:
-                # 로그 파일에만 남긴다. [진단정보 복사]가 여기서 가져간다.
-                # 상태줄로 보내면 바로 앞의 '다운로드 완료' 안내를 이 기술적인 줄이 덮어쓴다.
-                write_app_log(summary)
+            # 요약은 로그 파일에만 남긴다. [진단정보 복사]가 여기서 가져간다.
+            # 상태줄로 보내면 바로 앞의 '다운로드 완료' 안내를 이 기술적인 줄이 덮어쓴다.
+            # 여러 줄이라 한 줄씩 적는다 (줄마다 시각이 붙어야 언제 것인지 가릴 수 있다).
+            for line in manager.end_download_stats().splitlines():
+                write_app_log(line)
             write_app_log(f"Download thread finished. success={success_cnt} fail={fail_cnt} stopped={self.is_stopped} elapsed={self.elapsed_sec}s")
             self.finished_signal.emit(self.target_dir, success_cnt, fail_cnt, self.is_stopped)
 

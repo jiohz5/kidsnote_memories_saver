@@ -187,6 +187,7 @@ def run(direct=True, cdp=False, browser=False, capture=False, raw=RAW, stop_afte
         "_browser_fetch_media": lambda d, url, timeout=60: ((b"BRW", "200") if browser else (None, "cors")),
         "_element_screenshot_b64": lambda el, log=None: ("UE5HREFUQQ==" if capture else ""),
         "WebDriverWait": lambda d, t: type("W", (), {"until": lambda self, f: True})(),
+        "_wait_page_settled": lambda *a, **k: False,
     }
     saved = {k: getattr(m, k) for k in patches}
     saved_sleep = m.time.sleep

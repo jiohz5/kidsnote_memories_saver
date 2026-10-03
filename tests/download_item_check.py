@@ -92,7 +92,8 @@ def run(cards, mem, url=FakeDriver.current_url, both=False, renav=None, overwrit
     renav_calls = []
     saved = {k: getattr(m, k) for k in ("download_photos_only", "download_as_pdf",
                                         "_sleep_with_stop", "save_debug_snapshot",
-                                        "navigate_to_memory_view", "_watch_during_wait")}
+                                        "navigate_to_memory_view", "_wait_for",
+                                        "_wait_page_settled")}
     saved_sleep = m.time.sleep
     driver = FakeDriver(cards)
     driver.current_url = url
@@ -110,7 +111,9 @@ def run(cards, mem, url=FakeDriver.current_url, both=False, renav=None, overwrit
     m._sleep_with_stop = lambda s, cb=None, step=0.25: False
     m.save_debug_snapshot = lambda *a, **k: None
     m.navigate_to_memory_view = fake_renav
-    m._watch_during_wait = lambda seconds, checks, cb: False   # 실제 시간을 기다리지 않는다
+    # 조건 대기는 실제 시간을 기다리지 않고 바로 '조건 맞음'으로 끝낸다
+    m._wait_for = lambda cond, max_wait, cb=None, label=None: (False, True)
+    m._wait_page_settled = lambda *a, **k: False
     m.time.sleep = lambda s: None
     try:
         if both:
@@ -189,15 +192,17 @@ try:
     _drv = FakeDriver([target])
     _old_sleep = m.time.sleep
     m.time.sleep = lambda s: None
-    _old_watch = m._watch_during_wait
-    m._watch_during_wait = lambda s, c, cb: False
+    _old_waits = (m._wait_for, m._wait_page_settled)
+    m._wait_for = lambda cond, max_wait, cb=None, label=None: (False, True)
+    m._wait_page_settled = lambda *a, **k: False
     _old_sws = m._sleep_with_stop
     m._sleep_with_stop = lambda s, cb=None, step=0.25: False
     try:
         res = m.download_post(_drv, mem_as_listed("2026.7.14", LONG), pdf_path=_pdf,
                               media_dir=_tmp, is_overwrite_allow=False)
     finally:
-        m.time.sleep, m._watch_during_wait, m._sleep_with_stop = _old_sleep, _old_watch, _old_sws
+        m.time.sleep, m._sleep_with_stop = _old_sleep, _old_sws
+        m._wait_for, m._wait_page_settled = _old_waits
 finally:
     m.download_photos_only, m.download_as_pdf = _saved
 check("있는 PDF 는 건너뛰고 사진만 받음", _order, ["사진"])
@@ -243,22 +248,56 @@ check("대기 효과: 3번 중 2번 변화", any("시험 대기: 3번 중 2번 �
 check("전환 시점: 평균 0.4초 최대 0.5초", any("시험 전환 평균 0.4초 최대 0.5초 (2번)" in l for l in lines), True)
 check("횟수 기록", any("시험 횟수 3" in l for l in lines), True)
 
-print("\n== 고정 대기 중 전환 시점 재기 ==")
+print("\n== 조건 대기: 조건이 맞으면 바로 넘어간다 ==")
 m.begin_download_stats()
-_start = m.time.time()
 _flag = {"n": 0}
+
+
 def _becomes_true():
     _flag["n"] += 1
     return _flag["n"] >= 3
-stopped = m._watch_during_wait(0.5, {"곧 일어남": _becomes_true, "안 일어남": lambda: False}, None)
-_took = m.time.time() - _start
-check("기다리는 시간은 그대로 (0.5초)", 0.45 <= _took < 1.0, True)
-check("중지 아님", stopped, False)
-_lines = m.end_download_stats()   # 다운로드 건수가 0이라 요약 문자열은 비지만 기록은 남았다
-check("일어난 시점 기록", len(m._dl_stats["moments"].get("곧 일어남", [])), 1)
-check("끝내 안 일어난 것도 셈", m._dl_stats["counts"].get("안 일어남 안 일어남"), 1)
-stopped = m._watch_during_wait(5, {}, lambda: True)
-check("중지 요청이 오면 바로 멈춤", stopped, True)
+
+
+_t = m.time.time()
+stopped, ok = m._wait_for(_becomes_true, 5.0, None, label="시험 조건")
+check("조건이 맞자 참으로 끝남", (stopped, ok), (False, True))
+check("상한(5초)까지 기다리지 않음", m.time.time() - _t < 1.0, True)
+check("걸린 시간 기록", len(m._dl_stats["moments"].get("시험 조건", [])), 1)
+stopped, ok = m._wait_for(lambda: False, 0.3, None, label="안 맞는 조건")
+check("끝내 안 맞으면 거짓", (stopped, ok), (False, False))
+check("  -> 안 일어남으로 셈", m._dl_stats["counts"].get("안 맞는 조건 안 일어남"), 1)
+check("중지 요청이 오면 바로 멈춤", m._wait_for(lambda: False, 5.0, lambda: True), (True, False))
+
+print("\n== 조건 대기: 화면이 조용해질 때까지 ==")
+
+
+class _StateDriver(object):
+    """execute_script 가 불릴 때마다 정해진 화면 상태를 차례로 돌려준다."""
+
+    def __init__(self, states):
+        self.states = list(states)
+
+    def execute_script(self, script, *a):
+        return self.states.pop(0) if len(self.states) > 1 else self.states[0]
+
+
+# 처음 몇 번은 글과 이미지가 늘어나다(그리는 중) 멈춘다
+growing = [[100, 900, 5, 2], [180, 1200, 8, 1], [260, 1500, 9, 0]] + [[260, 1500, 9, 0]] * 100
+_t = m.time.time()
+stopped = m._wait_page_settled(_StateDriver(growing), quiet=0.3, max_wait=3.0, label="시험 안정")
+_took = m.time.time() - _t
+check("멈추면 상한(3초)까지 가지 않음", _took < 1.5, True)
+check("바뀌는 동안은 기다림 (조용한 0.3초 이상)", _took >= 0.3, True)
+check("상한 도달로 세지 않음", m._dl_stats["counts"].get("시험 안정 상한 도달"), None)
+
+# 덜 받은 이미지가 남아 있으면 화면이 조용해도 넘어가지 않는다
+loading = [[260, 1500, 9, 2]] * 100
+_t = m.time.time()
+m._wait_page_settled(_StateDriver(loading), quiet=0.1, max_wait=0.6, label="시험 이미지")
+check("덜 받은 이미지가 있으면 상한까지 기다림", m.time.time() - _t >= 0.55, True)
+check("  -> 상한 도달로 셈", m._dl_stats["counts"].get("시험 이미지 상한 도달"), 1)
+check("중지 요청이 오면 True",
+      m._wait_page_settled(_StateDriver(loading), 0.1, 5.0, check_stop_callback=lambda: True), True)
 
 print()
 if fails:

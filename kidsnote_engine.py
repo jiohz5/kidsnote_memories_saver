@@ -1563,9 +1563,12 @@ def fetch_memory_list(driver, request=None, callbacks=None, result_info=None):
     return memories
 
 
-def download_as_pdf(driver, post_info, target_path, status_callback=None, check_stop_callback=None):
-    """
-    Saves the currently open post detail page as a PDF using CDP.
+def download_as_pdf(driver, post_info, target_path, status_callback=None, check_stop_callback=None,
+                    already_scrolled=False):
+    """지금 열린 상세 화면을 PDF 로 저장한다 (CDP Page.printToPDF).
+
+    already_scrolled 가 참이면 같은 방문에서 이미 페이지 끝까지 훑은 것이라
+    레이지 로딩을 위한 스크롤을 다시 하지 않는다.
     """
     def log(msg):
         if status_callback and 'DEBUG' not in msg:
@@ -1582,31 +1585,35 @@ def download_as_pdf(driver, post_info, target_path, status_callback=None, check_
             )
         except Exception:
             pass
-        _before = _page_state(driver)
-        if _sleep_with_stop(2, check_stop_callback):  # 댓글 섹션 렌더링 추가 대기
+        # 댓글 섹션 렌더링 추가 대기. 예전 고정 2초는 20번 모두 아무 변화가 없었다.
+        if _wait_page_settled(driver, quiet=0.4, max_wait=2.0,
+                              check_stop_callback=check_stop_callback, label="PDF 시작 안정"):
             log("다운로드가 중지되었습니다.")
             return False
-        _note_wait("PDF 시작 2초", _before, _page_state(driver))
 
         # 1. 페이지 전체 스크롤을 단계별로 내려서 레이지 로딩 타겟(댓글창, 이미지 등)을 모두 불러옴
-        try:
-            raw_height = driver.execute_script("return document.body.scrollHeight")
-            total_height = int(raw_height if raw_height else 2000)
-            for i in range(1, total_height + 1, 800):
-                if _stop_requested(check_stop_callback):
-                    log("다운로드가 중지되었습니다.")
-                    return False
-                driver.execute_script(f"window.scrollTo(0, {i});")
-                time.sleep(0.5)
-                _note_count("PDF 스크롤 단계")
-        except Exception as scroll_e:
-            pass
+        #
+        # 같은 방문에서 사진 저장이 방금 페이지 끝까지 훑었다면 다시 훑지 않는다.
+        # 같은 화면을 두 번 스크롤해 봐야 새로 불러올 것이 없다 (실측: 글당 약 2.5초).
+        if not already_scrolled:
+            try:
+                raw_height = driver.execute_script("return document.body.scrollHeight")
+                total_height = int(raw_height if raw_height else 2000)
+                for i in range(1, total_height + 1, 800):
+                    if _stop_requested(check_stop_callback):
+                        log("다운로드가 중지되었습니다.")
+                        return False
+                    driver.execute_script(f"window.scrollTo(0, {i});")
+                    time.sleep(0.5)
+                    _note_count("PDF 스크롤 단계")
+            except Exception as scroll_e:
+                pass
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        _before = _page_state(driver)
-        if _sleep_with_stop(3, check_stop_callback):  # 마지막 하단 댓글/이미지 렌더링 넉넉히 대기
+        # 마지막 하단 댓글/이미지 렌더링 대기. 예전 고정 3초는 20번 모두 아무 변화가 없었다.
+        if _wait_page_settled(driver, quiet=0.6, max_wait=3.0,
+                              check_stop_callback=check_stop_callback, label="PDF 하단 안정"):
             log("다운로드가 중지되었습니다.")
             return False
-        _note_wait("PDF 하단 3초", _before, _page_state(driver))
 
         # 2. 하단까지 스크롤되어 표시된 댓글 더보기 버튼 반복 클릭 (접힌 댓글 펼치기)
         #
@@ -1670,10 +1677,12 @@ def download_as_pdf(driver, post_info, target_path, status_callback=None, check_
 
         # 3. 댓글이 다 펼쳐지고 난 뒤 문서 전체 높이가 늘어났을 수 있으므로 다시 한번 맨 아래로 스크롤
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        _before = _page_state(driver)
-        time.sleep(1) # 최종 화면 안정화 대기
+        # 최종 화면 안정화. 예전 고정 1초는 20번 모두 아무 변화가 없었다.
+        if _wait_page_settled(driver, quiet=0.4, max_wait=1.0,
+                              check_stop_callback=check_stop_callback, label="PDF 마무리 안정"):
+            log("다운로드가 중지되었습니다.")
+            return False
         _after = _page_state(driver)
-        _note_wait("PDF 마무리 1초", _before, _after)
         if _after and len(_after) > 3 and _after[3]:
             # 인쇄 직전인데 아직 덜 받은 이미지가 있다 = 대기가 모자랐다는 신호
             _note_count("PDF 인쇄 직전 덜 뜬 이미지", _after[3])
@@ -1910,14 +1919,16 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
             )
         except Exception:
             pass 
-        _before = _page_state(driver)
-        if _sleep_with_stop(2.0, check_stop_callback):  # 레이지 로딩된 이미지 태그가 DOM에 붙는 시간을 충분히 기다림
+        # 레이지 로딩된 이미지 태그가 DOM에 붙기를 기다린다. 예전에는 고정 2초였는데
+        # 실측에서 20번 모두 그 사이 화면이 바뀌지 않았다. 조용해지면 바로 넘어간다.
+        if _wait_page_settled(driver, quiet=0.5, max_wait=2.0,
+                              check_stop_callback=check_stop_callback, label="사진 시작 안정"):
             log("다운로드가 중지되었습니다.")
             return False
-        _note_wait("사진 시작 2초", _before, _page_state(driver))
-            
+
         # 스크롤 최적화 복구: 보폭이 너무 넓거나 대기시간이 짧으면(0.1초 등) 화면의 이미지들이 로드 요청을 쏘지 못함
         try:
+            _before_scroll = _page_state(driver)
             raw_height = driver.execute_script("return document.body.scrollHeight")
             total_height = int(raw_height if raw_height else 3000)
             for i in range(1, total_height + 1, 800):
@@ -1928,12 +1939,15 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
                 time.sleep(0.4)
                 _note_count("사진 스크롤 단계")
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            _before = _page_state(driver)
-            if _sleep_with_stop(1.5, check_stop_callback):  # 마지막 이미지 로딩 대기
+            # 마지막 이미지 로딩 대기. 예전 고정 1.5초도 20번 모두 아무 변화가 없었다.
+            if _wait_page_settled(driver, quiet=0.4, max_wait=1.5,
+                                  check_stop_callback=check_stop_callback, label="사진 하단 안정"):
                 log("다운로드가 중지되었습니다.")
                 return False
             _after = _page_state(driver)
-            _note_wait("사진 하단 1.5초", _before, _after)
+            # 스크롤이 무언가를 불러왔는가. 한 번도 안 바뀐다면 이 페이지는 레이지 로딩이
+            # 아니라는 뜻이라, 다음에 스크롤 자체를 줄일 근거가 된다.
+            _note_wait("사진 스크롤 전후", _before_scroll, _after)
             if _after and len(_after) > 3 and _after[3]:
                 # 사진을 고르기 직전인데 덜 받은 이미지가 있다 = 대기가 모자랐다는 신호
                 _note_count("사진 고르기 직전 덜 뜬 이미지", _after[3])
@@ -2126,6 +2140,45 @@ def _page_state(driver):
         return ()
 
 
+def _wait_page_settled(driver, quiet, max_wait, check_stop_callback=None, label=None):
+    """화면이 quiet 초 동안 바뀌지 않고 덜 받은 이미지도 없을 때까지 기다린다. 최대 max_wait 초.
+
+    예전에는 이 자리마다 고정 시간을 기다렸다. 실측(글 20개)에서 그 고정 대기 다섯 군데는
+    모두 '기다리는 동안 화면이 한 번도 바뀌지 않았다'. 이미 다 그려진 화면을 몇 초씩
+    더 쳐다보고 있었던 것이다. 그렇다고 그냥 지우면, 느린 날 다 그려지기 전에 저장하게 된다.
+    그래서 '조용해질 때까지'를 기다린다. 화면이 바뀌면 다시 센다. 상한은 예전 고정 시간이라
+    느린 날에도 예전보다 오래 기다리지는 않는다.
+
+    '바뀜'은 본문 글자 수, 문서 높이, 이미지 수, 덜 받은 이미지 수로 본다.
+    중지 요청이 오면 True 를 돌려준다.
+    """
+    start = time.time()
+    last = _page_state(driver)
+    last_change = start
+    hit_max = False
+    while True:
+        if _stop_requested(check_stop_callback):
+            return True
+        if time.time() - start >= max_wait:
+            hit_max = True
+            break
+        time.sleep(0.1)
+        cur = _page_state(driver)
+        if cur != last:
+            last = cur
+            last_change = time.time()
+            continue
+        images_done = not cur or len(cur) < 4 or cur[3] == 0
+        if images_done and time.time() - last_change >= quiet:
+            break
+    if label:
+        _note_moment(label, time.time() - start)
+        if hit_max:
+            _note_count(label + " 상한 도달")
+    stopped = False
+    return stopped
+
+
 def _note_wait(label, before, after):
     """고정 대기 하나가 실제로 무언가를 바꿨는지 기록한다.
 
@@ -2212,37 +2265,27 @@ def end_download_stats():
     return "\n".join(lines)
 
 
-def _watch_during_wait(seconds, checks, check_stop_callback):
-    """예전과 똑같이 seconds 초를 기다리되, 그 사이 checks 의 각 조건이 처음 참이 된 시각을 기록한다.
+def _wait_for(condition, max_wait, check_stop_callback=None, label=None):
+    """condition() 이 참이 될 때까지 최대 max_wait 초 기다린다. (중지됨, 참이_됐음) 을 돌려준다.
 
-    기다리는 시간은 바꾸지 않는다. '이 고정 대기를 조건 대기로 바꿔도 되는가'를 판단할
-    근거만 모은다. 조건이 끝내 참이 되지 않으면 그것도 센다 (그 조건은 쓸 수 없다는 뜻).
-    중지 요청이 오면 True 를 돌려준다.
+    label 을 주면 참이 되기까지 걸린 시간(또는 끝내 안 된 횟수)을 측정에 남긴다.
     """
     start = time.time()
-    seen = {}
     while True:
-        elapsed = time.time() - start
-        if elapsed >= seconds:
-            break
+        try:
+            if condition():
+                if label:
+                    _note_moment(label, time.time() - start)
+                return False, True
+        except Exception:
+            pass
         if _stop_requested(check_stop_callback):
-            return True
-        for name, check in checks.items():
-            if name in seen:
-                continue
-            try:
-                if check():
-                    seen[name] = elapsed
-            except Exception:
-                pass
-        time.sleep(min(0.1, max(0.0, seconds - elapsed)))
-    for name in checks:
-        if name in seen:
-            _note_moment(name, seen[name])
-        else:
-            _note_count(name + " 안 일어남")
-    stopped = False
-    return stopped
+            return True, False
+        if time.time() - start >= max_wait:
+            if label:
+                _note_count(label + " 안 일어남")
+            return False, False
+        time.sleep(0.1)
 
 
 def download_post(driver, mem, pdf_path=None, media_dir=None, status_callback=None,
@@ -2300,7 +2343,9 @@ def download_post(driver, mem, pdf_path=None, media_dir=None, status_callback=No
             if _stop_requested(check_stop_callback):
                 pdf_ok = False
             else:
-                pdf_ok = download_as_pdf(driver, mem, pdf_path, status_callback, check_stop_callback)
+                # 사진 저장이 방금 이 화면을 끝까지 훑었다면 PDF 쪽은 다시 훑지 않는다
+                pdf_ok = download_as_pdf(driver, mem, pdf_path, status_callback, check_stop_callback,
+                                         already_scrolled=want_media)
         return pdf_ok, media_ok
 
     if mem.get('url'):
@@ -2447,18 +2492,20 @@ def download_post(driver, mem, pdf_path=None, media_dir=None, status_callback=No
                 log("다운로드가 중지되었습니다.")
                 return fail
             _t_found = time.time()
-            _list_url = driver.current_url or ''
             driver.execute_script("arguments[0].click();", found_post)
-            # 이 2초는 지우면 안 된다. 사진 저장 쪽은 '이미지가 보이면 준비됨'으로 판단하는데,
-            # 상세 화면으로 바뀌기 전에는 목록의 썸네일이 그대로 보여서 그것을 이 글의
-            # 사진으로 알고 저장할 수 있다. 줄이려면 '상세 화면으로 바뀌었다'는 조건이 필요하다.
-            # 기다리는 시간은 그대로 2초다. 다만 그 사이 '상세 화면으로 바뀐 것'을 알려 줄 수
-            # 있는 신호 두 가지가 언제 나타나는지 기록한다. 둘 중 하나가 늘 금방 나타난다면
-            # 다음에 이 2초를 그 신호를 기다리는 것으로 바꿀 수 있다.
-            if _watch_during_wait(2, {
-                    "상세 열림(주소 바뀜)": lambda: (driver.current_url or '') != _list_url,
-                    "상세 열림(목록 카드 사라짐)": lambda: not driver.find_elements(By.XPATH, post_card_xpath()),
-            }, check_stop_callback):
+            # 상세 화면으로 바뀌기를 기다린다.
+            #
+            # 원래 고정 2초였고, 그냥 지우면 안 된다. 사진 저장 쪽은 '이미지가 보이면 준비됨'으로
+            # 판단하는데, 상세 화면으로 바뀌기 전에는 목록의 썸네일이 그대로 보여서 그것을
+            # 이 글의 사진으로 알고 저장할 수 있다.
+            # 실측(20번)에서 목록 카드는 누른 뒤 최대 0.4초 안에 사라졌다. 그래서 '목록 카드가
+            # 사라질 때까지' 기다린 다음, 상세 화면이 다 그려져 조용해질 때까지 기다린다.
+            stopped, _gone = _wait_for(
+                lambda: not driver.find_elements(By.XPATH, post_card_xpath()),
+                2.0, check_stop_callback, label="상세 열림(목록 카드 사라짐)")
+            if stopped or _wait_page_settled(driver, quiet=0.8, max_wait=2.0,
+                                             check_stop_callback=check_stop_callback,
+                                             label="상세 화면 안정"):
                 log("다운로드가 중지되었습니다.")
                 return fail
             save_debug_snapshot(driver, f"Opened_{mem['type']}_Detail", status_callback, mem=mem)
@@ -2468,13 +2515,13 @@ def download_post(driver, mem, pdf_path=None, media_dir=None, status_callback=No
             _t_saved = time.time()
 
             # 다운로드 완료 후 뒤로가기를 호출하여 리스트 상태로 복귀!! (이것이 속도의 핵심)
-            # 1.5초도 함부로 줄이지 않는다. 목록이 다 그려지기 전에 다음 글을 찾으면 못 찾고,
-            # 그러면 홈부터 다시 들어가는 훨씬 느린 길로 빠진다.
+            # 목록이 다 그려지기 전에 다음 글을 찾으면 못 찾고, 그러면 홈부터 다시 들어가는
+            # 훨씬 느린 길로 빠진다. 그래서 카드가 다시 나타나고 화면이 조용해질 때까지 기다린다.
+            # (예전 고정 1.5초. 실측에서 카드는 돌아오자마자 있었다)
             driver.back()
-            # 1.5초는 그대로 기다리고, 그 사이 목록 카드가 다시 나타난 시점만 기록한다
-            _watch_during_wait(1.5, {
-                "목록 복귀(카드 나타남)": lambda: bool(driver.find_elements(By.XPATH, post_card_xpath())),
-            }, None)
+            _wait_for(lambda: bool(driver.find_elements(By.XPATH, post_card_xpath())),
+                      1.5, None, label="목록 복귀(카드 나타남)")
+            _wait_page_settled(driver, quiet=0.3, max_wait=1.5, label="목록 복귀 안정")
             _record_download_timing(found_how, _t_found - _t0, _t_open - _t_found,
                                     _t_saved - _t_open, time.time() - _t_saved, log)
             return res
