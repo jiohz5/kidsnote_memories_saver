@@ -76,6 +76,8 @@ def _no_question(self, title, text, default_button=None):
 
 
 ks.KidsnoteApp._show_top_question = _no_question
+# 시간 초과로 받는 도중에 끝낼 때도 창이 닫혀야 한다 (묻는 창이 '아니오'로 닫기를 막지 않게)
+ks.KidsnoteApp._confirm_close_while_busy = lambda self: True
 for _name in ("warning", "information", "critical"):
     setattr(Box, _name, staticmethod(
         lambda *a, **k: (note("[경고창 생략] " + str(a[1] if len(a) > 1 else "")), Box.StandardButton.Ok)[1]))

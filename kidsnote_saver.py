@@ -415,6 +415,23 @@ class BackgroundTask(QtCore.QThread):
                           % (getattr(self._fn, '__name__', '?'), traceback.format_exc()))
 
 
+class LockVeil(QtWidgets.QWidget):
+    """작업 중에 화면 일부를 덮어 그 아래를 누르지 못하게 하는 막.
+
+    막을 누르면 clicked 를 보낸다. 왜 막혔는지 알리는 데 쓴다.
+    """
+    clicked = QtCore.pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # 파이썬에서 상속한 위젯은 이것을 켜야 스타일시트의 배경색을 그린다
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+
+    def mousePressEvent(self, event):
+        self.clicked.emit()
+        event.accept()
+
+
 class KidsnoteApp(QtWidgets.QWidget):
     ui_call_signal = QtCore.pyqtSignal(object)
 
@@ -427,6 +444,8 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.stop_flag = False
         self.is_downloading = False
         self.is_loading_memories = False
+        # 화면에 드러내는 작업 상태: None / 'load' / 'download' (_set_busy_ui)
+        self._busy_kind = None
         self.load_finished_received = False
         self.download_thread = None
         # 돌고 있는 백그라운드 작업들. 창을 닫을 때 여기 있는 것들이 끝나기를 기다린다.
@@ -720,6 +739,50 @@ class KidsnoteApp(QtWidgets.QWidget):
         stage2_lock_layout.addWidget(stage2_lock_label)
         self.stage2_lock_overlay.hide()  # 초기에는 1단계 오버레이가 가리고 있으므로 숨김 (1단계 열릴 때 같이 켬)
 
+        # --- 다운로드 중 2/3단계 잠금 ---
+        # 받는 동안 목록 선택이나 저장 설정을 바꿔도 이번 다운로드에는 반영되지 않는다.
+        # 바뀐 줄 알고 기다리는 일이 없도록 잠그고, 왜 잠겼는지와 멈추는 방법을 그 자리에 적는다.
+        # 표는 비쳐 보이게 두고(무엇을 받는 중인지 보이게), 맨 아래 [일시정지] 줄은 덮지 않는다.
+        self.busy_overlay = LockVeil(self)
+        self.busy_overlay.setObjectName("busyOverlay")
+        self.busy_overlay.setStyleSheet(f"""
+            #busyOverlay {{ background-color: rgba(255, 243, 224, 150); }}
+            #busyCard {{ background-color: #FFF3E0; border: {S(2)}px solid #EF6C00; border-radius: {S(8)}px; }}
+            #busyCard QLabel {{ background: transparent; color: #7A3A00; }}
+        """)
+        busy_card = QtWidgets.QFrame(self.busy_overlay)
+        busy_card.setObjectName("busyCard")
+        busy_card_layout = QtWidgets.QVBoxLayout(busy_card)
+        busy_card_layout.setContentsMargins(FS(24), FS(14), FS(24), FS(14))
+        busy_card_layout.setSpacing(FS(8))
+        busy_title = QtWidgets.QLabel("⏳ 다운로드 중에는 목록 선택과 저장 설정을 바꿀 수 없습니다")
+        busy_title.setStyleSheet(f"font-size: {FS(16)}px; font-weight: bold;")
+        busy_title.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        busy_hint = QtWidgets.QLabel(
+            "지금 바꿔도 이번 다운로드에는 반영되지 않습니다.\n"
+            "멈추려면 위의 [작업 중지], 잠깐 쉬려면 아래의 [일시정지]를 눌러 주세요."
+        )
+        busy_hint.setStyleSheet(f"font-size: {FS(13)}px;")
+        busy_hint.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        # 원래 3단계의 [경로 열기]가 함께 잠기므로, 받는 중에 열어 볼 수 있게 여기 둔다
+        self.busy_open_dir_btn = QtWidgets.QPushButton("📂 받은 파일 보기")
+        self.busy_open_dir_btn.setToolTip("저장 폴더를 엽니다. 다운로드는 그대로 계속됩니다.")
+        self.busy_open_dir_btn.clicked.connect(self._open_download_dir)
+        busy_card_layout.addWidget(busy_title)
+        busy_card_layout.addWidget(busy_hint)
+        busy_card_layout.addWidget(self.busy_open_dir_btn, alignment=QtCore.Qt.AlignmentFlag.AlignHCenter)
+        busy_layout = QtWidgets.QVBoxLayout(self.busy_overlay)
+        busy_layout.addStretch()
+        busy_layout.addWidget(busy_card, alignment=QtCore.Qt.AlignmentFlag.AlignHCenter)
+        busy_layout.addStretch()
+        self.busy_overlay.clicked.connect(self._flash_status)
+        self.busy_overlay.hide()
+
+        # 덮개들이 기준으로 삼는 칸. 이 칸들이 움직이면 덮개도 다시 놓는다 (eventFilter)
+        self._overlay_anchors = (self.status_label, self.table_group, self.options_group)
+        for anchor in self._overlay_anchors:
+            anchor.installEventFilter(self)
+
         # 이전 실행에서 쓰던 저장 경로·옵션 복원 (매번 다시 고르지 않도록)
         self._restore_prefs()
 
@@ -818,9 +881,20 @@ class KidsnoteApp(QtWidgets.QWidget):
         status_area_layout = QtWidgets.QVBoxLayout()
         status_area_layout.setSpacing(FS(5))
 
+        # 상태줄 색. 목록을 불러오거나 받는 중에는 주황으로 바꿔, 지금 무언가 진행 중이라
+        # 다른 것을 건드리면 안 된다는 것을 한눈에 알게 한다 (_set_busy_ui).
+        # 잠긴 곳을 누르면 잠깐 빨갛게 깜박인다 (_flash_status).
+        # 테두리 두께만큼 안쪽 여백을 줄여, 색이 바뀌어도 줄 높이는 그대로 둔다.
+        status_base = f"font-weight: bold; color: white; font-size: {FS(16)}px; border-radius: {S(5)}px;"
+        edge = S(2)
+        self._status_styles = {
+            "idle": status_base + f"background-color: #03A9F4; padding: {FS(8)}px; border: none;",
+            "busy": status_base + f"background-color: #EF6C00; padding: {FS(8) - edge}px; border: {edge}px solid #BF360C;",
+            "alert": status_base + f"background-color: #D32F2F; padding: {FS(8) - edge}px; border: {edge}px solid #8E0000;",
+        }
         self.status_label = QtWidgets.QLabel('준비됨')
         self.status_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self.status_label.setStyleSheet(f"font-weight: bold; color: white; background-color: #03A9F4; font-size: {FS(16)}px; padding: {FS(8)}px; border-radius: {S(5)}px;")
+        self.status_label.setStyleSheet(self._status_styles["idle"])
         status_area_layout.addWidget(self.status_label)
 
         # 아랫줄: 진행률 바 + 보조 버튼들
@@ -1212,9 +1286,11 @@ class KidsnoteApp(QtWidgets.QWidget):
         options_grid.addWidget(filetype_group_box, 1, 0, 1, 2)
         
         options_layout.addLayout(options_grid)
-        
+
         options_group.setLayout(options_layout)
         main_layout.addWidget(options_group)
+        # 다운로드 중에는 이 그룹을 잠근다 (_set_busy_ui)
+        self.options_group = options_group
 
     def _fit_window_to_contents(self):
         """레이아웃이 실제로 요구하는 너비에 창을 맞춘다.
@@ -1249,6 +1325,18 @@ class KidsnoteApp(QtWidgets.QWidget):
     # --- 로딩 및 잠금 오버레이 제어 ---
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._place_overlays()
+
+    def eventFilter(self, obj, event):
+        # 창 크기는 그대로인데 안의 배치만 바뀌는 경우(안내 배너가 숨는 등)에도
+        # 덮개들이 덮어야 할 칸을 따라가게 한다. 창 크기 변화만 보면 그때는 어긋난다.
+        if (event.type() in (QtCore.QEvent.Type.Move, QtCore.QEvent.Type.Resize)
+                and obj in getattr(self, '_overlay_anchors', ())):
+            self._place_overlays()
+        return super().eventFilter(obj, event)
+
+    def _place_overlays(self):
+        """덮개들을 지금 배치에 맞게 놓는다."""
         self._overlay.setGeometry(self.rect())
         
         # 1단계 잠금 오버레이 (로그인 후 해제)
@@ -1266,6 +1354,67 @@ class KidsnoteApp(QtWidgets.QWidget):
                 new_geom_stage2 = QtCore.QRect(0, y_offset_stage2, self.width(), self.height() - y_offset_stage2)
                 if self.stage2_lock_overlay.geometry() != new_geom_stage2:
                     self.stage2_lock_overlay.setGeometry(new_geom_stage2)
+
+        # 다운로드 중 2/3단계 잠금
+        if hasattr(self, 'busy_overlay') and self.busy_overlay.isVisible():
+            self._place_busy_overlay()
+
+    def _place_busy_overlay(self):
+        """다운로드 중 잠금막을 2단계 표 위쪽부터 3단계 설정 아래쪽까지 덮게 둔다.
+
+        맨 아래 [다운로드 시작][일시정지] 줄은 덮지 않는다 — 받는 중에도 눌러야 하는 버튼이다.
+        """
+        top = self.table_group.geometry().top()
+        bottom = self.options_group.geometry().bottom()
+        if top > 0 and bottom > top:
+            geom = QtCore.QRect(0, top, self.width(), bottom - top + 1)
+            if self.busy_overlay.geometry() != geom:
+                self.busy_overlay.setGeometry(geom)
+
+    def _set_busy_ui(self, kind):
+        """지금 작업 중인지를 화면에 드러낸다. kind: None(쉬는 중) / 'load'(목록 불러오는 중) / 'download'.
+
+        - 작업 중에는 상태줄을 주황으로 바꿔 눈에 띄게 한다.
+        - 다운로드 중에는 2·3단계(목록 선택, 저장 설정)를 잠그고 그 위에 이유를 적는다.
+          받는 동안 바꿔도 이번 다운로드에는 반영되지 않아, 바뀐 줄 알고 기다리게 되기 때문이다.
+          목록을 불러오는 중에는 잠그지 않는다 — 그때 고른 체크는 이어지는 다운로드에 그대로 쓰인다.
+        (1단계 버튼들은 _set_shared_controls_enabled 가 따로 잠근다)
+        """
+        self._busy_kind = kind
+        self.status_label.setStyleSheet(self._status_styles["busy" if kind else "idle"])
+        downloading = kind == "download"
+        # 덮기만 하면 마우스는 막혀도 키보드(스페이스로 체크 등)는 그대로 들어가므로 함께 잠근다
+        self.table_group.setEnabled(not downloading)
+        self.options_group.setEnabled(not downloading)
+        if downloading:
+            self._place_busy_overlay()
+            self.busy_overlay.show()
+            self.busy_overlay.raise_()
+        else:
+            self.busy_overlay.hide()
+
+    def _flash_status(self):
+        """잠긴 곳을 누르면 상태줄을 몇 번 깜박여, 지금 작업 중이라는 것과 볼 곳을 알린다."""
+        if getattr(self, '_flash_left', 0) > 0:
+            return
+        self._flash_left = 6
+        self._flash_step()
+
+    def _flash_step(self):
+        self._flash_left -= 1
+        alert = self._flash_left % 2 == 1
+        self.status_label.setStyleSheet(
+            self._status_styles["alert" if alert else ("busy" if self._busy_kind else "idle")])
+        if self._flash_left > 0:
+            QtCore.QTimer.singleShot(150, self._flash_step)
+
+    def _open_download_dir(self):
+        """받는 중에 저장 폴더를 연다. 다운로드는 그대로 계속된다."""
+        target = getattr(self.download_thread, 'target_dir', None) or self.dir_input.text()
+        if target and os.path.exists(target):
+            os.startfile(target)
+        else:
+            QtWidgets.QMessageBox.information(self, "안내", "아직 저장 폴더가 없습니다.\n첫 파일을 받으면 생깁니다.")
 
     def _show_overlay(self, text='잠시만 기다려 주세요...'):
         self.run_on_ui_thread(lambda: self._do_show_overlay(text))
@@ -1301,7 +1450,7 @@ class KidsnoteApp(QtWidgets.QWidget):
         if hasattr(self, 'stage2_lock_overlay'):
             self.stage2_lock_overlay.show()
             self.stage2_lock_overlay.raise_()
-            self.resizeEvent(None)
+            self._place_overlays()
 
     def select_directory(self):
         directory = QtWidgets.QFileDialog.getExistingDirectory(self, "저장 폴더 선택")
@@ -1522,9 +1671,7 @@ class KidsnoteApp(QtWidgets.QWidget):
             self.table.setRowCount(0)
             self.update_selection_label()
             self.download_btn.setEnabled(False)
-            if hasattr(self, 'stage2_lock_overlay'):
-                self.stage2_lock_overlay.show()
-                self.stage2_lock_overlay.raise_()
+            self._show_stage2_lock_overlay()
             self._show_top_message(
                 QtWidgets.QMessageBox.Icon.Information, "목록을 다시 불러와 주세요",
                 f"[{combo_text}] (으)로 전환했습니다.\n\n"
@@ -1870,8 +2017,9 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.loading_banner.setVisible(True)
         self.update_progress(0)
         self.is_loading_memories = True
+        self._set_busy_ui("load")
         self.load_finished_received = False
-        
+
         self.memories = []
         self.table.setRowCount(0)
 
@@ -2041,6 +2189,7 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.stop_btn.setEnabled(False)
         self.download_btn.setEnabled(True)
         self.loading_banner.setVisible(False)
+        self._set_busy_ui(None)
         
         # 목록 조회가 끝났으므로 2,3단계 조작 가능하도록 오버레이 해제
         if hasattr(self, 'stage2_lock_overlay') and self.stage2_lock_overlay.isVisible():
@@ -2233,6 +2382,7 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.pause_btn.setEnabled(True)
         self.pause_btn.setText('일시정지')
         self.is_downloading = True
+        self._set_busy_ui("download")
         self.update_progress(0)
         self.update_status(f"다운로드 준비 중... 선택 {len(selected_indices)}개")
 
@@ -2272,6 +2422,7 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.pause_btn.setEnabled(False)
         self.pause_btn.setText('일시정지')
         self._set_shared_controls_enabled(True)
+        self._set_busy_ui(None)
 
         finished_thread = self.download_thread
 
@@ -2305,6 +2456,7 @@ class KidsnoteApp(QtWidgets.QWidget):
             self.pause_btn.setEnabled(False)
             self.pause_btn.setText('일시정지')
             self._set_shared_controls_enabled(True)
+            self._set_busy_ui(None)
             self.update_status("다운로드가 비정상 종료되었습니다. 로그를 확인해 주세요.")
 
     def _show_download_complete(self, target_dir, success_cnt, fail_cnt, is_stopped, elapsed_sec=0):
@@ -2525,7 +2677,26 @@ class KidsnoteApp(QtWidgets.QWidget):
         except Exception:
             pass
 
+    def _confirm_close_while_busy(self):
+        """작업 중에 창을 닫으려 하면 한 번 묻는다. 닫아도 되면 True."""
+        if self.is_downloading:
+            title = "다운로드가 진행 중입니다"
+            text = ("지금 창을 닫으면 다운로드가 중간에 멈춥니다.\n"
+                    "(그때까지 받은 파일은 그대로 남습니다)\n\n그래도 닫을까요?")
+        elif self.is_loading_memories:
+            title = "목록을 불러오는 중입니다"
+            text = "지금 창을 닫으면 목록 불러오기가 중간에 멈춥니다.\n\n그래도 닫을까요?"
+        else:
+            return True
+        reply = self._show_top_question(title, text,
+                                        default_button=QtWidgets.QMessageBox.StandardButton.No)
+        return reply == QtWidgets.QMessageBox.StandardButton.Yes
+
     def closeEvent(self, event):
+        # 받는 중에 실수로 닫는 일이 없도록 먼저 묻는다
+        if not self._confirm_close_while_busy():
+            event.ignore()
+            return
         self.hide() # 즉시 창 숨김 처리 (종료 시 딜레이 및 잔상 제거)
 
         # 실행 중인 QThread가 있으면 중지 요청 후 짧게 대기.
