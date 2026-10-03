@@ -80,7 +80,8 @@ class ScrapeThread(QtCore.QThread):
     profile_signal = QtCore.pyqtSignal(dict)
     finished_signal = QtCore.pyqtSignal(list)
 
-    def __init__(self, driver, scrape_reports=True, scrape_albums=True, limit_date_str=None, child_name=None, end_date_str=None):
+    def __init__(self, driver, scrape_reports=True, scrape_albums=True, limit_date_str=None, child_name=None, end_date_str=None,
+                 fetch_profile_image=True):
         super().__init__()
         self.driver = driver
         self.scrape_reports = scrape_reports
@@ -88,6 +89,7 @@ class ScrapeThread(QtCore.QThread):
         self.limit_date_str = limit_date_str
         self.end_date_str = end_date_str
         self.child_name = child_name
+        self.fetch_profile_image = fetch_profile_image
         self.is_stopped = False
         # 조회 결과 진단 정보 — GUI가 '기간 내 항목 없음'과 '네트워크 실패'를 구분해 안내
         self.result_info = {}
@@ -102,6 +104,7 @@ class ScrapeThread(QtCore.QThread):
                     start_date=self.limit_date_str,
                     end_date=self.end_date_str,
                     child_name=self.child_name,
+                    fetch_profile_image=self.fetch_profile_image,
                 ),
                 callbacks=manager.ScrapeCallbacks(
                     status=self.status_signal.emit,
@@ -295,53 +298,42 @@ class DownloadThread(QtCore.QThread):
                         self.status_signal.emit("알림장/앨범 다운로드가 중지되었습니다.")
                         break
 
-                    # PDF와 사진/동영상을 각각 독립적으로 저장한다.
-                    # (둘 다 받는 모드에서는 같은 항목에 대해 두 번 호출되며, 저장 위치는 동일 폴더)
-                    step_results = []
+                    # 글 하나를 한 번만 열어 필요한 것(PDF, 사진/동영상)을 함께 저장한다.
+                    # 예전에는 [PDF+사진] 모드에서 같은 글을 두 번 찾아 열고 닫았다.
+                    pdf_path = media_dir = None
 
                     if self.want_pdf:
-                        path = plan.pdf_path
+                        pdf_path = plan.pdf_path
                         if plan.date_dir:
                             os.makedirs(plan.date_dir, exist_ok=True)
                         # 예전 버전은 제목 없이 저장했다. 같은 게시물의 옛 파일이 있으면
                         # 새 이름으로 바꿔서 같은 글이 두 벌로 쌓이는 것을 막는다.
                         if plan.legacy_pdf_path and os.path.exists(plan.legacy_pdf_path) \
-                                and not os.path.exists(path):
+                                and not os.path.exists(pdf_path):
                             try:
-                                os.replace(plan.legacy_pdf_path, path)
-                                write_app_log(f"Renamed legacy PDF to titled name: {os.path.basename(path)}")
+                                os.replace(plan.legacy_pdf_path, pdf_path)
+                                write_app_log(f"Renamed legacy PDF to titled name: {os.path.basename(pdf_path)}")
                             except OSError:
                                 pass
 
-                        step_results.append(manager.download_item(
-                            self.driver,
-                            mem,
-                            path,
-                            True,
-                            self.status_signal.emit,
-                            self.is_overwrite_allow,
-                            self.check_stopped,
-                            self.include_video,
-                            self.network_blocked,
-                        ))
+                    if self.want_media:
+                        media_dir = plan.media_dir
+                        os.makedirs(media_dir, exist_ok=True)
 
-                    if self.want_media and not self.is_stopped:
-                        post_dir = plan.media_dir
-                        os.makedirs(post_dir, exist_ok=True)
-                        step_results.append(manager.download_item(
-                            self.driver,
-                            mem,
-                            post_dir,
-                            False,
-                            self.status_signal.emit,
-                            self.is_overwrite_allow,
-                            self.check_stopped,
-                            self.include_video,
-                            self.network_blocked,
-                        ))
+                    pdf_ok, media_ok = manager.download_post(
+                        self.driver,
+                        mem,
+                        pdf_path=pdf_path,
+                        media_dir=media_dir,
+                        status_callback=self.status_signal.emit,
+                        is_overwrite_allow=self.is_overwrite_allow,
+                        check_stop_callback=self.check_stopped,
+                        include_video=self.include_video,
+                        prefer_browser_fetch=self.network_blocked,
+                    )
 
                     # 하나라도 실패하면 실패로 본다 (성공으로 위장하지 않는다)
-                    success = bool(step_results) and all(step_results)
+                    success = pdf_ok and media_ok
 
                     if success:
                         success_cnt += 1
@@ -1880,10 +1872,14 @@ class KidsnoteApp(QtWidgets.QWidget):
         self.table.setRowCount(0)
 
         child_name = None
+        # 로그인 때 받아 둔 아이 사진이 있으면 조회할 때 다시 받지 않는다.
+        # 없을 때(사내망 등으로 로그인 때 실패)만 조회하면서 한 번 더 시도한다.
+        need_profile_image = True
         if hasattr(self, 'children_data') and self.children_data:
             idx = self.child_combo.currentIndex()
             if 0 <= idx < len(self.children_data):
                 child_name = self.children_data[idx]['text'].split()[0]
+                need_profile_image = not self.children_data[idx].get('img_b64')
 
         self.scrape_thread = ScrapeThread(
             driver=self.driver,
@@ -1891,7 +1887,8 @@ class KidsnoteApp(QtWidgets.QWidget):
             scrape_albums=self.chk_album.isChecked(),
             limit_date_str=limit_date_str,
             child_name=child_name,
-            end_date_str=end_date_str
+            end_date_str=end_date_str,
+            fetch_profile_image=need_profile_image,
         )
         self.scrape_thread.status_signal.connect(self.update_status)
         self.scrape_thread.profile_signal.connect(self.update_profile)

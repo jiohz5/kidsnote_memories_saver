@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """다운로드 스레드가 실제로 만드는 폴더·파일 배치를 검증한다.
 
-네트워크와 브라우저 없이 돌린다. 엔진의 download_item 을 가짜로 바꿔
+네트워크와 브라우저 없이 돌린다. 엔진의 download_post 를 가짜로 바꿔
 '저장했다고 치고' 빈 파일만 만들게 한 뒤, 디스크에 남은 결과를 확인한다.
+가짜는 몇 번 불렸는지도 센다. [PDF+사진] 모드에서 글 하나를 한 번만 열어야 하기 때문이다.
 
 경로 계산은 tests/paths_check.py 가 따로 검증하지만, 계산한 경로를 스레드가
 제대로 쓰는지는 별개 문제라서 여기서 본다. 옛 이름 넘겨받기와 빈 폴더 정리처럼
@@ -35,19 +36,21 @@ def check(name, got, want):
 app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
-def fake_download_item(driver, mem, target_path_or_dir, is_pdf, status_cb=None,
-                       overwrite=True, check_stop=None, include_video=True,
-                       network_blocked=False):
-    """실제 저장 대신 빈 파일만 만든다. 사진 모드면 폴더에 파일 두 개."""
-    if is_pdf:
-        os.makedirs(os.path.dirname(target_path_or_dir), exist_ok=True)
-        open(target_path_or_dir, 'wb').close()
-    else:
-        os.makedirs(target_path_or_dir, exist_ok=True)
+post_calls = []   # 글을 연 횟수 (가짜 download_post 가 불린 횟수)
+
+
+def fake_download_post(driver, mem, pdf_path=None, media_dir=None, **kwargs):
+    """실제 저장 대신 빈 파일만 만든다. PDF 는 하나, 사진은 폴더에 두 개."""
+    post_calls.append((pdf_path is not None, media_dir is not None))
+    if pdf_path:
+        os.makedirs(os.path.dirname(pdf_path), exist_ok=True)
+        open(pdf_path, 'wb').close()
+    if media_dir:
+        os.makedirs(media_dir, exist_ok=True)
         prefix = "%s_%s" % (mem.get('_prefix', 'x'), mem.get('post_index', 0))
         for i in (1, 2):
-            open(os.path.join(target_path_or_dir, "%s_%d.jpg" % (prefix, i)), 'wb').close()
-    return True
+            open(os.path.join(media_dir, "%s_%d.jpg" % (prefix, i)), 'wb').close()
+    return True, True
 
 
 def run_download(memories, single_folder=False, is_pdf=True, is_both=False,
@@ -60,8 +63,9 @@ def run_download(memories, single_folder=False, is_pdf=True, is_both=False,
             os.makedirs(os.path.dirname(full), exist_ok=True)
             open(full, 'wb').close()
 
-    original = manager.download_item
-    manager.download_item = fake_download_item
+    original = manager.download_post
+    manager.download_post = fake_download_post
+    del post_calls[:]
     try:
         th = ks.DownloadThread(
             driver=None, memories=memories, indices=list(range(len(memories))),
@@ -71,7 +75,7 @@ def run_download(memories, single_folder=False, is_pdf=True, is_both=False,
         )
         th.run()   # 스레드를 띄우지 않고 본문만 그대로 실행
     finally:
-        manager.download_item = original
+        manager.download_post = original
 
     found = []
     for root, _dirs, files in os.walk(target):
@@ -141,18 +145,30 @@ print("\n== PDF와 사진 동시 저장 ==")
 files, _ = run_download([MEM('2026.07.14', '물놀이', '앨범')], is_pdf=True, is_both=True)
 check("PDF 1개 + 사진 2개가 같은 날짜 폴더에", len(files), 3)
 check("모두 같은 폴더", len({os.path.dirname(f) for f in files}), 1)
+# 예전에는 같은 글을 PDF 로 한 번, 사진으로 한 번 따로 열었다
+check("글은 한 번만 열고 PDF·사진을 함께 저장", post_calls, [(True, True)])
+
+files, _ = run_download([MEM('2026.07.14', '물놀이', '앨범', '1'),
+                         MEM('2026.07.15', '소풍', '앨범', '2')], is_pdf=True, is_both=True)
+check("글 두 개면 두 번 연다 (네 번이 아니라)", len(post_calls), 2)
+
+print("\n== PDF 만, 사진만 ==")
+run_download([MEM('2026.07.14', '물놀이')], is_pdf=True)
+check("PDF 만 요청하면 PDF 만", post_calls, [(True, False)])
+run_download([MEM('2026.07.14', '물놀이', '앨범')], is_pdf=False)
+check("사진만 요청하면 사진만", post_calls, [(False, True)])
 
 print("\n== 저장에 실패하면 빈 폴더를 남기지 않는다 ==")
-original = manager.download_item
+original = manager.download_post
 target = tempfile.mkdtemp(prefix="kn_layout_fail_")
-manager.download_item = lambda *a, **k: False   # 항상 실패
+manager.download_post = lambda *a, **k: (False, False)   # 항상 실패
 try:
     th = ks.DownloadThread(driver=None, memories=[MEM('2026.07.14', '물놀이')],
                            indices=[0], target_dir=target, is_pdf=True,
                            is_single_folder=False, profile_name="홍길동")
     th.run()
 finally:
-    manager.download_item = original
+    manager.download_post = original
 leftover = [d for d in os.listdir(target)] if os.path.isdir(target) else []
 shutil.rmtree(target, ignore_errors=True)
 check("빈 날짜 폴더도 빈 유형 폴더도 남지 않음", leftover, [])

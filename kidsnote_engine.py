@@ -10,7 +10,7 @@ from urllib.parse import urljoin, urlparse
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
 
 # 날짜 해석은 kidsnote_paths 한 곳에서만 한다 (예전에는 다섯 군데에 복사돼 있었다)
 import kidsnote_paths as paths
@@ -892,15 +892,25 @@ def _scrape_list_pages(driver, item_type, memories, log,
 
     info = result_info if isinstance(result_info, dict) else {}
     page_count = 1
+
+    # 쪽마다 어디서 시간이 드는지 info 에 쌓는다. 호출한 쪽이 목록별로 한 줄 요약을 남긴다.
+    #   t_wait   목록이 뜨기를 기다림     t_stable 카드 개수가 멈추기를 기다림
+    #   t_parse  카드를 읽음              t_next   다음 쪽으로 넘어감
+    def _acc(key, since):
+        info[key] = info.get(key, 0.0) + (time.time() - since)
+
     log(f"DEBUG: _scrape_list_pages 시작. 대상: {item_type}, 현재 URL: {driver.current_url}")
     while True:
         if check_stop_callback and check_stop_callback():
             log(f"DEBUG: {item_type} 수집 중지 요청 확인됨.")
             break
 
+        info['pages'] = info.get('pages', 0) + 1
         # Wait for items to load (에러 화면이 뜨면 타임아웃을 기다리지 않고 즉시 빠져나옴)
         log(f"DEBUG: {page_count}페이지 로딩 대기 중 (최대 30초)...")
+        _tp = time.time()
         wait_outcome = _wait_for_list_or_app_error(driver, timeout=30)
+        _acc('t_wait', _tp)
         if wait_outcome == 'error':
             log(f"DEBUG: {item_type} {page_count}페이지에서 키즈노트 자체 오류 화면 감지됨 (대기 중단).")
             info['app_error'] = True
@@ -919,6 +929,7 @@ def _scrape_list_pages(driver, item_type, memories, log,
         # (첫 카드 하나만 뜬 순간 수집을 시작해 '1개 수집 완료(빈 행)'로 끝나는 증상 방지)
         post_items = []
         used_fallback = False
+        _tp = time.time()
         try:
             prev_count = -1
             stable_deadline = time.time() + 6
@@ -930,6 +941,8 @@ def _scrape_list_pages(driver, item_type, memories, log,
                 time.sleep(0.4)
         except Exception:
             post_items, used_fallback = _find_post_cards(driver, log)
+        _acc('t_stable', _tp)
+        _tp_parse = time.time()
 
         if used_fallback:
             info['selector_fallback'] = True
@@ -1088,8 +1101,9 @@ def _scrape_list_pages(driver, item_type, memories, log,
                 log(f"DEBUG: 항목 {idx} 파싱 중 예외 발생: {type(inner_e).__name__}")
                 continue
         
+        _acc('t_parse', _tp_parse)
         log(f"{item_type} {page_count}페이지 완료 (수집: {new_items_found}개, 제외 등: {filtered_items_count}개, 중복: {duplicate_items_count}개) 총 {len(memories)}개 수집됨")
-        
+
         if total_items > 0 and duplicate_items_count == total_items:
             # 발견된 항목이 모두 기존에 수집된(중복) 항목일 경우 무한루프로 간주하고 중단
             log(f"DEBUG: 새로운 항목이 없습니다 (모두 중복됨). 탐색 종료.")
@@ -1099,8 +1113,14 @@ def _scrape_list_pages(driver, item_type, memories, log,
             break
             
         # Try to navigate to next page
+        _tp = time.time()
         try:
             log(f"DEBUG: '다음' 버튼 찾는 중...")
+            # 넘기기 전 첫 카드의 글. 넘긴 뒤 이것이 바뀌었는지로 다음 쪽이 떴는지 본다.
+            try:
+                _first_text = post_items[0].text if post_items else ""
+            except Exception:
+                _first_text = ""
             # '다음' 텍스트를 정확하게 포함하는 span을 가진 button만 찾음 (이전 버튼 제외)
             next_buttons = driver.find_elements(By.XPATH, NEXT_PAGE_XPATH)
             log(f"DEBUG: '다음' 버튼 요소 {len(next_buttons)}개 발견.")
@@ -1109,7 +1129,7 @@ def _scrape_list_pages(driver, item_type, memories, log,
             for btn_idx, btn in enumerate(next_buttons):
                 is_disabled = btn.get_attribute("disabled") or "disabled" in (btn.get_attribute("class") or "").lower()
                 is_displayed = btn.is_displayed()
-                log(f"DEBUG: 버튼 {btn_idx} - is_displayed: {is_displayed}, is_disabled: {is_disabled}, 태그: {btn.tag_name}")
+                log(f"DEBUG: 버튼 {btn_idx} - is_displayed: {is_displayed}, is_disabled: {is_disabled}")
                 if not is_disabled and is_displayed:
                     log(f"DEBUG: 클릭 가능한 '다음' 버튼 클릭 시도 (인덱스 {btn_idx}).")
                     driver.execute_script("arguments[0].click();", btn)
@@ -1122,13 +1142,30 @@ def _scrape_list_pages(driver, item_type, memories, log,
                 
             page_count += 1
             if post_items:
+                # 다음 쪽이 떴는지는 '첫 카드가 바뀌었는가'로 본다. 두 가지 경우가 있다.
+                #   - 첫 카드 요소가 사라졌다 (새 요소로 다시 그림)
+                #   - 요소는 그대로인데 안의 글이 바뀌었다 (React 가 요소를 재사용함)
+                # 예전에는 앞의 것만 봤다. 화면이 뒤의 방식으로 그려지면 조건이 끝내 맞지 않아
+                # 쪽마다 5초를 기다린 뒤 1초를 더 쉬었다. 빈 글로 바뀐 순간(내용이 아직 안 찬
+                # 껍데기 카드)은 넘어간 것으로 치지 않는다.
+                _first = post_items[0]
+
+                def _first_card_changed(d, _first=_first, _old=_first_text):
+                    try:
+                        now = _first.text
+                    except StaleElementReferenceException:
+                        return True
+                    return bool(now and now.strip()) and now != _old
+
                 try:
-                    WebDriverWait(driver, 5).until(EC.staleness_of(post_items[0]))
+                    WebDriverWait(driver, 5).until(_first_card_changed)
                 except Exception:
+                    info['next_timeouts'] = info.get('next_timeouts', 0) + 1
                     time.sleep(1) # Fallback
         except Exception as e:
             log(f"페이지 이동 중 오류: {e}")
             break
+        _acc('t_next', _tp)
 
 
 # 이름이 보이는 아바타를 찾아 누른다. 아이 전환은 React 상태 변경이라 주소를
@@ -1255,15 +1292,21 @@ class ScrapeRequest(object):
     가리지 않고 전부 가져온다 (화면의 [전체]).
     """
 
-    __slots__ = ('reports', 'albums', 'start_date', 'end_date', 'child_name')
+    __slots__ = ('reports', 'albums', 'start_date', 'end_date', 'child_name',
+                 'fetch_profile_image')
 
     def __init__(self, reports=True, albums=True,
-                 start_date=None, end_date=None, child_name=None):
+                 start_date=None, end_date=None, child_name=None,
+                 fetch_profile_image=True):
         self.reports = reports          # 알림장을 가져올까
         self.albums = albums            # 앨범을 가져올까
         self.start_date = start_date    # 이 날짜보다 오래된 글은 건너뛴다
         self.end_date = end_date        # 이 날짜보다 최근 글은 건너뛴다
         self.child_name = child_name    # 이 아이로 전환한 뒤 조회한다
+        # 아이 얼굴 사진을 다시 받을까. 로그인 때 이미 받아 두었다면 받을 필요가 없다.
+        # 예전에는 [목록 불러오기]를 누를 때마다 다시 받았고, 브라우저 방식이 실패한 뒤
+        # 두 번째 방식으로 넘어가느라 시간이 더 들었다.
+        self.fetch_profile_image = fetch_profile_image
 
     @property
     def labels(self):
@@ -1333,6 +1376,10 @@ def fetch_memory_list(driver, request=None, callbacks=None, result_info=None):
 
     info = result_info if isinstance(result_info, dict) else {}
     memories = []
+    _t0 = time.time()
+
+    def _mark(step):
+        log("[KN-DIAG] 소요 조회시작: %s %.1f초" % (step, time.time() - _t0))
 
     # 0. /service 홈으로 이동 후 아이 전환 (이미 홈이면 리로드 생략)
     log("서비스 페이지로 이동 중...")
@@ -1340,6 +1387,7 @@ def fetch_memory_list(driver, request=None, callbacks=None, result_info=None):
         driver.get("https://www.kidsnote.com/service")
     # React Hydration 완료(아바타 렌더링)를 감지하는 즉시 진행 (고정 1초 대기 제거)
     wait_css(driver, ANY_AVATAR_CSS, timeout=10)
+    _mark("홈 준비까지")
 
     if child_name is not None:
         try:
@@ -1358,6 +1406,7 @@ def fetch_memory_list(driver, request=None, callbacks=None, result_info=None):
                 wait_css(driver, ANY_AVATAR_CSS, timeout=10)
         except Exception as e:
             log(f"아이 전환 중 오류 (무시됨): {e}")
+        _mark("아이 전환까지")
 
     # 주의: 예전에는 여기서 추억보기 메뉴를 미리 한 번 클릭했으나 제거했다.
     # SPA는 URL이 /service 그대로인 채 화면만 바뀌므로, 미리 클릭해 두면
@@ -1402,9 +1451,14 @@ def fetch_memory_list(driver, request=None, callbacks=None, result_info=None):
             name, age, url = result
             profile_text = f"{name} {age}".strip()
             log(f"프로필 획득: {profile_text}")
-            
-            # 브라우저 fetch → requests → 요소 캡처 순으로 가장 견고하게 확보
-            img_b64 = get_profile_image_b64(driver, url, log) or None
+
+            # 이름은 매번 읽는다. 지금 화면에 실제로 선택된 아이가 누구인지 기록에 남기는
+            # 것이라, 엉뚱한 아이의 글을 받는 사고를 알아챌 단서가 된다.
+            # 사진은 요청할 때만 받는다 (브라우저 fetch → requests → 요소 캡처 순).
+            img_b64 = None
+            if request.fetch_profile_image:
+                img_b64 = get_profile_image_b64(driver, url, log) or None
+            _mark("프로필까지")
 
             if profile_found_callback:
                 profile_found_callback({"text": profile_text, "image": img_b64})
@@ -1432,6 +1486,16 @@ def fetch_memory_list(driver, request=None, callbacks=None, result_info=None):
                 _scrape_list_pages(driver, label, memories, log,
                                    request=request, callbacks=callbacks,
                                    result_info=attempt_info)
+                # 목록 한 종류를 다 훑은 뒤 쪽당 어디서 시간이 들었는지 한 줄 남긴다
+                pages = attempt_info.get('pages', 0)
+                if pages:
+                    log("[KN-DIAG] 소요 목록 %s: %d쪽 | 쪽당 뜨기 %.1f초 · 안정 %.1f초 · 읽기 %.1f초 · 넘김 %.1f초 | 넘김 시간초과 %d번"
+                        % (label, pages,
+                           attempt_info.get('t_wait', 0.0) / pages,
+                           attempt_info.get('t_stable', 0.0) / pages,
+                           attempt_info.get('t_parse', 0.0) / pages,
+                           attempt_info.get('t_next', 0.0) / max(1, pages - 1),
+                           attempt_info.get('next_timeouts', 0)))
             collected = len(memories) - before
 
             app_error = collected == 0 and (attempt_info.get('app_error') or _detect_kidsnote_app_error(driver))
@@ -1518,10 +1582,12 @@ def download_as_pdf(driver, post_info, target_path, status_callback=None, check_
             )
         except Exception:
             pass
+        _before = _page_state(driver)
         if _sleep_with_stop(2, check_stop_callback):  # 댓글 섹션 렌더링 추가 대기
             log("다운로드가 중지되었습니다.")
             return False
-            
+        _note_wait("PDF 시작 2초", _before, _page_state(driver))
+
         # 1. 페이지 전체 스크롤을 단계별로 내려서 레이지 로딩 타겟(댓글창, 이미지 등)을 모두 불러옴
         try:
             raw_height = driver.execute_script("return document.body.scrollHeight")
@@ -1532,14 +1598,28 @@ def download_as_pdf(driver, post_info, target_path, status_callback=None, check_
                     return False
                 driver.execute_script(f"window.scrollTo(0, {i});")
                 time.sleep(0.5)
+                _note_count("PDF 스크롤 단계")
         except Exception as scroll_e:
             pass
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        _before = _page_state(driver)
         if _sleep_with_stop(3, check_stop_callback):  # 마지막 하단 댓글/이미지 렌더링 넉넉히 대기
             log("다운로드가 중지되었습니다.")
             return False
-            
+        _note_wait("PDF 하단 3초", _before, _page_state(driver))
+
         # 2. 하단까지 스크롤되어 표시된 댓글 더보기 버튼 반복 클릭 (접힌 댓글 펼치기)
+        #
+        # 눌러도 화면이 늘지 않은 요소는 다시 누르지 않는다. 아래 XPath는 '전체 댓글',
+        # '대댓글' 같은 글자가 들어간 요소면 무엇이든 잡는데, 그중에는 버튼이 아니라
+        # 그냥 제목('전체 댓글 3')인 것도 있다. 예전에는 그런 요소를 눌러도 아무 일이
+        # 없으니 그대로 남아 매번 다시 눌렀고, 한 글에서 최대 20번 × 1.8초 = 36초를 썼다.
+        # 진짜 '더보기' 버튼은 누르면 댓글이 늘어 화면이 커지므로 계속 누른다.
+        #
+        # 판단은 다음 바퀴에서 한다. 누른 직후에 바로 판단하면, 댓글이 1.5초 안에 다
+        # 들어오지 못한 진짜 버튼을 헛클릭으로 오해해 댓글을 빠뜨릴 수 있다.
+        clicked_before = {}   # 요소 id -> 그 요소를 누르기 직전의 화면 상태
+        dud_ids = set()
         try:
             max_attempts = 20
             for _ in range(max_attempts):
@@ -1560,11 +1640,24 @@ def download_as_pdf(driver, post_info, target_path, status_callback=None, check_
                 clicked = False
                 for btn in btns:
                     try:
+                        if btn.id in dud_ids:
+                            continue
+                        prev = clicked_before.get(btn.id)
+                        if prev:
+                            now = _page_state(driver)
+                            # 지난번에 눌렀는데 지금까지도 글자·높이가 그때보다 늘지 않았다면
+                            # 버튼이 아니라 그냥 글자였던 것이다. 다시 누르지 않는다.
+                            if now and now[0] <= prev[0] and now[1] <= prev[1]:
+                                dud_ids.add(btn.id)
+                                _note_count("PDF 댓글 헛클릭")
+                                continue
                         if btn.is_displayed():
+                            clicked_before[btn.id] = _page_state(driver)
                             driver.execute_script("arguments[0].scrollIntoView(true);", btn)
                             time.sleep(0.3)
                             driver.execute_script("arguments[0].click();", btn)
                             clicked = True
+                            _note_count("PDF 댓글 클릭")
                             if _sleep_with_stop(1.5, check_stop_callback):
                                 log("다운로드가 중지되었습니다.")
                                 return False
@@ -1577,7 +1670,13 @@ def download_as_pdf(driver, post_info, target_path, status_callback=None, check_
 
         # 3. 댓글이 다 펼쳐지고 난 뒤 문서 전체 높이가 늘어났을 수 있으므로 다시 한번 맨 아래로 스크롤
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        _before = _page_state(driver)
         time.sleep(1) # 최종 화면 안정화 대기
+        _after = _page_state(driver)
+        _note_wait("PDF 마무리 1초", _before, _after)
+        if _after and len(_after) > 3 and _after[3]:
+            # 인쇄 직전인데 아직 덜 받은 이미지가 있다 = 대기가 모자랐다는 신호
+            _note_count("PDF 인쇄 직전 덜 뜬 이미지", _after[3])
         if _stop_requested(check_stop_callback):
             log("다운로드가 중지되었습니다.")
             return False
@@ -1811,9 +1910,11 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
             )
         except Exception:
             pass 
+        _before = _page_state(driver)
         if _sleep_with_stop(2.0, check_stop_callback):  # 레이지 로딩된 이미지 태그가 DOM에 붙는 시간을 충분히 기다림
             log("다운로드가 중지되었습니다.")
             return False
+        _note_wait("사진 시작 2초", _before, _page_state(driver))
             
         # 스크롤 최적화 복구: 보폭이 너무 넓거나 대기시간이 짧으면(0.1초 등) 화면의 이미지들이 로드 요청을 쏘지 못함
         try:
@@ -1825,10 +1926,17 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
                     return False
                 driver.execute_script(f"window.scrollTo(0, {i});")
                 time.sleep(0.4)
+                _note_count("사진 스크롤 단계")
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            _before = _page_state(driver)
             if _sleep_with_stop(1.5, check_stop_callback):  # 마지막 이미지 로딩 대기
                 log("다운로드가 중지되었습니다.")
                 return False
+            _after = _page_state(driver)
+            _note_wait("사진 하단 1.5초", _before, _after)
+            if _after and len(_after) > 3 and _after[3]:
+                # 사진을 고르기 직전인데 덜 받은 이미지가 있다 = 대기가 모자랐다는 신호
+                _note_count("사진 고르기 직전 덜 뜬 이미지", _after[3])
         except Exception as scroll_e:
             pass
         
@@ -2003,12 +2111,57 @@ def download_photos_only(driver, post_info, target_dir, status_callback=None, ch
 _DL_DETAIL_ITEMS = 3
 _dl_stats = {}
 
+# 화면 상태: (본문 글자 수, 문서 높이, 이미지 수, 아직 덜 받은 이미지 수)
+_PAGE_STATE_JS = """
+var imgs = Array.prototype.slice.call(document.images || []);
+var incomplete = imgs.filter(function (i) { return !i.complete; }).length;
+return [(document.body.innerText || '').length, document.body.scrollHeight, imgs.length, incomplete];
+"""
+
+
+def _page_state(driver):
+    try:
+        return tuple(driver.execute_script(_PAGE_STATE_JS) or ())
+    except Exception:
+        return ()
+
+
+def _note_wait(label, before, after):
+    """고정 대기 하나가 실제로 무언가를 바꿨는지 기록한다.
+
+    대기 전후의 화면 상태가 같으면 그 대기는 아무 일도 하지 않은 것이다. 여러 글에서
+    한 번도 바뀐 적이 없는 대기는 줄여도 된다는 근거가 된다. 반대로 바뀌는 일이 잦으면
+    그 대기는 실제로 무언가를 기다리고 있는 것이라 함부로 줄이면 안 된다.
+    """
+    if not _dl_stats:
+        begin_download_stats()
+    if not before or not after:
+        return
+    changed = (before[0] != after[0] or before[1] != after[1] or before[2] != after[2]
+               or after[3] < before[3])
+    rec = _dl_stats["waits"].setdefault(label, [0, 0])
+    rec[0] += 1
+    rec[1] += 1 if changed else 0
+
+
+def _note_count(key, n=1):
+    if not _dl_stats:
+        begin_download_stats()
+    _dl_stats["counts"][key] = _dl_stats["counts"].get(key, 0) + n
+
+
+def _note_moment(key, seconds):
+    """'화면이 바뀐 시점'처럼 고정 대기 중에 실제 사건이 일어난 시각을 모은다."""
+    if not _dl_stats:
+        begin_download_stats()
+    _dl_stats["moments"].setdefault(key, []).append(seconds)
+
 
 def begin_download_stats():
     """다운로드 한 번을 시작할 때 부른다. 측정값을 비운다."""
     _dl_stats.clear()
     _dl_stats.update({"items": 0, "find": 0.0, "open": 0.0, "save": 0.0, "back": 0.0,
-                      "how": {}})
+                      "how": {}, "waits": {}, "counts": {}, "moments": {}})
 
 
 def _record_download_timing(how, find, open_, save, back, log):
@@ -2026,62 +2179,140 @@ def _record_download_timing(how, find, open_, save, back, log):
 
 
 def end_download_stats():
-    """다운로드 한 번이 끝나면 부른다. 요약 한 줄(없으면 빈 문자열)을 돌려준다."""
+    """다운로드 한 번이 끝나면 부른다. 요약(없으면 빈 문자열)을 돌려준다.
+
+    여러 줄일 수 있고, 줄마다 [KN-DIAG] 가 붙어 있어 진단정보 복사에 모두 담긴다.
+    """
     n = _dl_stats.get("items", 0)
     if not n:
         return ""
     how = ", ".join("%s %d" % (k, v) for k, v in sorted(_dl_stats["how"].items(), key=lambda x: -x[1]))
-    return ("[KN-DIAG] 소요 다운로드 요약 | %d건 | 평균 찾기 %.1f초(%s) | 열기 %.1f초 | "
-            "저장 %.1f초 | 목록복귀 %.1f초"
-            % (n, _dl_stats["find"] / n, how, _dl_stats["open"] / n,
-               _dl_stats["save"] / n, _dl_stats["back"] / n))
+    lines = [("[KN-DIAG] 소요 다운로드 요약 | %d건 | 평균 찾기 %.1f초(%s) | 열기 %.1f초 | "
+              "저장 %.1f초 | 목록복귀 %.1f초"
+              % (n, _dl_stats["find"] / n, how, _dl_stats["open"] / n,
+                 _dl_stats["save"] / n, _dl_stats["back"] / n))]
+
+    # 고정 대기마다 '그 사이 화면이 바뀐 횟수'. 0이면 그 대기는 하는 일이 없었다.
+    waits = _dl_stats.get("waits") or {}
+    if waits:
+        lines.append("[KN-DIAG] 소요 대기효과 | " + " | ".join(
+            "%s: %d번 중 %d번 변화" % (k, v[0], v[1]) for k, v in waits.items()))
+
+    # 고정 대기 도중 실제로 화면이 바뀐 시점
+    moments = _dl_stats.get("moments") or {}
+    if moments:
+        lines.append("[KN-DIAG] 소요 화면전환 | " + " | ".join(
+            "%s 평균 %.1f초 최대 %.1f초 (%d번)" % (k, sum(v) / len(v), max(v), len(v))
+            for k, v in moments.items()))
+
+    counts = _dl_stats.get("counts") or {}
+    if counts:
+        lines.append("[KN-DIAG] 소요 기타 | " + " | ".join(
+            "%s %d" % (k, v) for k, v in counts.items()))
+    return "\n".join(lines)
 
 
-def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None, is_overwrite_allow=True, check_stop_callback=None, include_video=True, prefer_browser_fetch=False):
+def _watch_during_wait(seconds, checks, check_stop_callback):
+    """예전과 똑같이 seconds 초를 기다리되, 그 사이 checks 의 각 조건이 처음 참이 된 시각을 기록한다.
+
+    기다리는 시간은 바꾸지 않는다. '이 고정 대기를 조건 대기로 바꿔도 되는가'를 판단할
+    근거만 모은다. 조건이 끝내 참이 되지 않으면 그것도 센다 (그 조건은 쓸 수 없다는 뜻).
+    중지 요청이 오면 True 를 돌려준다.
     """
-    Handles robust navigation to the detail page and downloads it.
+    start = time.time()
+    seen = {}
+    while True:
+        elapsed = time.time() - start
+        if elapsed >= seconds:
+            break
+        if _stop_requested(check_stop_callback):
+            return True
+        for name, check in checks.items():
+            if name in seen:
+                continue
+            try:
+                if check():
+                    seen[name] = elapsed
+            except Exception:
+                pass
+        time.sleep(min(0.1, max(0.0, seconds - elapsed)))
+    for name in checks:
+        if name in seen:
+            _note_moment(name, seen[name])
+        else:
+            _note_count(name + " 안 일어남")
+    stopped = False
+    return stopped
+
+
+def download_post(driver, mem, pdf_path=None, media_dir=None, status_callback=None,
+                  is_overwrite_allow=True, check_stop_callback=None, include_video=True,
+                  prefer_browser_fetch=False):
+    """글 하나를 한 번만 열어 PDF 와 사진/동영상을 함께 저장한다. (pdf_ok, media_ok) 를 돌려준다.
+
+    pdf_path 가 있으면 PDF 를, media_dir 가 있으면 사진/동영상을 저장한다. 요청하지 않은
+    쪽과 이미 있어서 건너뛴 쪽은 True 다. 글을 찾거나 열지 못하면 (False, False).
+
+    예전에는 [PDF+사진] 모드에서 같은 글을 두 번 열었다. 목록에서 찾고, 열고, PDF 저장하고,
+    목록으로 돌아와, 다시 찾고, 다시 열고, 사진 저장하고, 또 돌아왔다. 15건이면 30번이었다.
+    실측으로 찾기·열기·복귀에만 한 번에 4초 남짓이 들었다.
+
+    사진을 먼저, PDF 를 나중에 한다. PDF 저장은 접힌 댓글을 펼쳐 화면을 바꾸는데, 사진
+    고르기를 그보다 앞에 두면 예전에 따로 열었을 때와 같은 화면에서 사진을 고르게 된다.
+    (PDF 쪽이 넣는 인쇄용 스타일은 @media print 안에 있어 화면 모양은 바꾸지 않는다)
     """
     def log(msg):
         if status_callback and 'DEBUG' not in msg: status_callback(msg)
 
+    fail = (False, False)
+    want_pdf = pdf_path is not None
+    want_media = media_dir is not None
+
     if _stop_requested(check_stop_callback):
         log("다운로드가 중지되었습니다.")
-        return False
-        
-    # 기존 파일이 있고 덮어쓰기가 허용되지 않으면 탐색 자체를 스킵
+        return fail
+
+    # 기존 파일이 있고 덮어쓰기가 허용되지 않으면 그 부분은 건너뛴다
     if not is_overwrite_allow:
-        if is_pdf:
-            if os.path.exists(target_path_or_dir):
-                log("이미 동일한 PDF 파일이 존재하여 다운로드를 건너뜁니다.")
-                return True
-        else:
-            if os.path.isdir(target_path_or_dir):
-                # 같은 폴더를 여러 게시물이 공유할 수 있으므로(한 곳에 모두 저장 옵션)
-                # "폴더가 비어있지 않음"이 아니라 "이 게시물의 파일명 prefix와 일치하는 파일 존재"로 판정
-                import re as _re
-                prefix_str = _media_prefix(mem)
-                pattern = _re.compile(_re.escape(prefix_str) + r"_\d+\.[A-Za-z0-9]+$")
-                try:
-                    existing = os.listdir(target_path_or_dir)
-                except OSError:
-                    existing = []
-                if any(pattern.match(name) for name in existing):
-                    log("이미 미디어 파일이 존재하여 다운로드를 건너뜁니다.")
-                    return True
+        if want_pdf and os.path.exists(pdf_path):
+            log("이미 동일한 PDF 파일이 존재하여 다운로드를 건너뜁니다.")
+            want_pdf = False
+        if want_media and os.path.isdir(media_dir):
+            # 같은 폴더를 여러 게시물이 공유할 수 있으므로(한 곳에 모두 저장 옵션)
+            # "폴더가 비어있지 않음"이 아니라 "이 게시물의 파일명 prefix와 일치하는 파일 존재"로 판정
+            prefix_str = _media_prefix(mem)
+            pattern = re.compile(re.escape(prefix_str) + r"_\d+\.[A-Za-z0-9]+$")
+            try:
+                existing = os.listdir(media_dir)
+            except OSError:
+                existing = []
+            if any(pattern.match(name) for name in existing):
+                log("이미 미디어 파일이 존재하여 다운로드를 건너뜁니다.")
+                want_media = False
+    if not want_pdf and not want_media:
+        return (True, True)   # 받을 것이 남지 않았다. 글을 열 필요도 없다.
+
+    def _save_parts():
+        pdf_ok = media_ok = True
+        if want_media:
+            media_ok = download_photos_only(driver, mem, media_dir, status_callback, check_stop_callback, include_video, prefer_browser_fetch)
+        if want_pdf:
+            if _stop_requested(check_stop_callback):
+                pdf_ok = False
+            else:
+                pdf_ok = download_as_pdf(driver, mem, pdf_path, status_callback, check_stop_callback)
+        return pdf_ok, media_ok
 
     if mem.get('url'):
         if _stop_requested(check_stop_callback):
             log("다운로드가 중지되었습니다.")
-            return False
+            return fail
         driver.get(mem['url'])
         if _sleep_with_stop(2, check_stop_callback):  # 상세 페이지 완전 로딩 대기 (댓글 포함)
             log("다운로드가 중지되었습니다.")
-            return False
-        if is_pdf:
-            return download_as_pdf(driver, mem, target_path_or_dir, status_callback, check_stop_callback)
-        else:
-            return download_photos_only(driver, mem, target_path_or_dir, status_callback, check_stop_callback, include_video, prefer_browser_fetch)
-            
+            return fail
+        return _save_parts()
+
     # Need to navigate
     try:
         def _find_target():
@@ -2123,17 +2354,27 @@ def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None,
         _t0 = time.time()
         if _stop_requested(check_stop_callback):
             log("다운로드가 중지되었습니다.")
-            return False
-        found_post = _find_target()
+            return fail
+
+        # 지금 화면이 '다른 종류'의 목록이면(앨범 목록인데 알림장 글을 찾는 경우) 이 화면과
+        # 다음 페이지에서 찾아봐야 나올 리가 없다. 곧장 그 종류의 목록으로 다시 들어간다.
+        # 실측: 첫 글에서 여기 걸려 찾기가 6.9초 걸렸다. 앨범 목록을 두 페이지 넘긴 뒤에야
+        # 다시 들어갔기 때문이다. 다른 종류 목록임이 주소로 분명할 때만 건너뛴다.
+        _marker = SECTION_URLS.get(mem.get('type'), '').rsplit('/', 1)[-1]
+        _other_markers = [u.rsplit('/', 1)[-1] for t, u in SECTION_URLS.items() if t != mem.get('type')]
+        _url_now = driver.current_url or ''
+        on_other_list = bool(_marker) and _marker not in _url_now and any(o in _url_now for o in _other_markers)
+
+        found_post = None if on_other_list else _find_target()
         found_how = "바로"
 
         # 2. Check if it's on the next screen (for consecutive downloads crossing page boundaries)
-        if not found_post:
+        if not found_post and not on_other_list:
             try:
                 for _ in range(2):
                     if _stop_requested(check_stop_callback):
                         log("다운로드가 중지되었습니다.")
-                        return False
+                        return fail
                     next_buttons = driver.find_elements(By.XPATH, NEXT_PAGE_XPATH)
                     found_next = False
                     for btn in next_buttons:
@@ -2158,20 +2399,20 @@ def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None,
             log("순차 탐색 범위를 벗어나 목록 화면(추억보기 뷰)을 재동기화합니다...")
             if _stop_requested(check_stop_callback):
                 log("다운로드가 중지되었습니다.")
-                return False
+                return fail
             target_child = mem.get('child_name')
             success = navigate_to_memory_view(driver, mem['type'], log, target_child=target_child)
             if not success:
                 log("추억보기 뷰 동기화 실패.")
                 save_debug_snapshot(driver, f"Error_Navigating_MemView", status_callback, mem=mem)
-                return False
+                return fail
 
             # Pagination
             target_page = mem.get('page', 1)
             for p in range(1, target_page):
                 if _stop_requested(check_stop_callback):
                     log("다운로드가 중지되었습니다.")
-                    return False
+                    return fail
                 try:
                     WebDriverWait(driver, 10).until(
                         EC.presence_of_element_located((By.XPATH, post_card_xpath()))
@@ -2187,7 +2428,7 @@ def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None,
                         break
                 if not found_next:
                     log(f"페이지 {target_page} 로 이동 실패 (다음 버튼 없음)")
-                    return False
+                    return fail
                 time.sleep(0.5)
 
             try:
@@ -2204,42 +2445,61 @@ def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None,
         if found_post:
             if _stop_requested(check_stop_callback):
                 log("다운로드가 중지되었습니다.")
-                return False
+                return fail
             _t_found = time.time()
+            _list_url = driver.current_url or ''
             driver.execute_script("arguments[0].click();", found_post)
             # 이 2초는 지우면 안 된다. 사진 저장 쪽은 '이미지가 보이면 준비됨'으로 판단하는데,
             # 상세 화면으로 바뀌기 전에는 목록의 썸네일이 그대로 보여서 그것을 이 글의
             # 사진으로 알고 저장할 수 있다. 줄이려면 '상세 화면으로 바뀌었다'는 조건이 필요하다.
-            if _sleep_with_stop(2, check_stop_callback):  # 상세 페이지 완전 로딩 대기 (댓글 로드를 위해 2초로 연장)
+            # 기다리는 시간은 그대로 2초다. 다만 그 사이 '상세 화면으로 바뀐 것'을 알려 줄 수
+            # 있는 신호 두 가지가 언제 나타나는지 기록한다. 둘 중 하나가 늘 금방 나타난다면
+            # 다음에 이 2초를 그 신호를 기다리는 것으로 바꿀 수 있다.
+            if _watch_during_wait(2, {
+                    "상세 열림(주소 바뀜)": lambda: (driver.current_url or '') != _list_url,
+                    "상세 열림(목록 카드 사라짐)": lambda: not driver.find_elements(By.XPATH, post_card_xpath()),
+            }, check_stop_callback):
                 log("다운로드가 중지되었습니다.")
-                return False
+                return fail
             save_debug_snapshot(driver, f"Opened_{mem['type']}_Detail", status_callback, mem=mem)
             _t_open = time.time()
 
-            if is_pdf:
-                res = download_as_pdf(driver, mem, target_path_or_dir, status_callback, check_stop_callback)
-            else:
-                res = download_photos_only(driver, mem, target_path_or_dir, status_callback, check_stop_callback, include_video, prefer_browser_fetch)
+            res = _save_parts()
             _t_saved = time.time()
 
             # 다운로드 완료 후 뒤로가기를 호출하여 리스트 상태로 복귀!! (이것이 속도의 핵심)
             # 1.5초도 함부로 줄이지 않는다. 목록이 다 그려지기 전에 다음 글을 찾으면 못 찾고,
             # 그러면 홈부터 다시 들어가는 훨씬 느린 길로 빠진다.
             driver.back()
-            time.sleep(1.5)
+            # 1.5초는 그대로 기다리고, 그 사이 목록 카드가 다시 나타난 시점만 기록한다
+            _watch_during_wait(1.5, {
+                "목록 복귀(카드 나타남)": lambda: bool(driver.find_elements(By.XPATH, post_card_xpath())),
+            }, None)
             _record_download_timing(found_how, _t_found - _t0, _t_open - _t_found,
                                     _t_saved - _t_open, time.time() - _t_saved, log)
             return res
         else:
             log("해당 위치에 게시물이 존재하지 않습니다. (날짜/제목 불일치)")
             save_debug_snapshot(driver, f"NotFound_{mem['type']}_Detail", status_callback, mem=mem)
-            return False
+            return fail
             
     except Exception as e:
         log(f"상세 페이지 이동 중 오류: {e}")
         save_debug_snapshot(driver, f"Error_Navigating_{mem['type']}", status_callback, mem=mem)
-        return False
+        return fail
 
+
+
+def download_item(driver, mem, target_path_or_dir, is_pdf, status_callback=None, is_overwrite_allow=True, check_stop_callback=None, include_video=True, prefer_browser_fetch=False):
+    """글 하나에서 PDF 또는 사진/동영상 한쪽만 저장한다. (download_post 의 한쪽만 쓰는 경우)"""
+    pdf_ok, media_ok = download_post(
+        driver, mem,
+        pdf_path=target_path_or_dir if is_pdf else None,
+        media_dir=None if is_pdf else target_path_or_dir,
+        status_callback=status_callback, is_overwrite_allow=is_overwrite_allow,
+        check_stop_callback=check_stop_callback, include_video=include_video,
+        prefer_browser_fetch=prefer_browser_fetch)
+    return pdf_ok if is_pdf else media_ok
 
 # ---------------------------------------------------------------------------
 # 로그인과 아이 목록
